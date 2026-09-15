@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
 
 import {
   OpcError,
@@ -31,8 +32,10 @@ import {
   type OrderEngine,
   type SkillDefinition,
   type SplitEntry,
+  type Task,
   type WriteResult,
 } from '../../core/src/index.js'
+import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
 import { createPackage, type SkillPackage } from '../../core/src/skill/packager.js'
 import type { TelemetryBus, TelemetryEvent } from '../../dsh-adapter/src/index.js'
 import { detectDshRuntime } from '../../dsh-adapter/src/index.js'
@@ -43,6 +46,8 @@ import type { TeamService } from '../../dsh-plugins/opc-team/src/index.js'
 /* ─────────────── 共享常量 ─────────────── */
 
 const TELEMETRY_RING_CAPACITY = 100
+/** content_publish 环形缓冲容量（GET /api/content/events） */
+const CONTENT_EVENTS_RING_CAPACITY = 50
 const MAX_BODY_BYTES = 1_000_000
 const DEFAULT_SKILL_PAGE_SIZE = 20
 const MAX_SKILL_PAGE_SIZE = 200
@@ -50,6 +55,11 @@ const MAX_SKILL_PAGE_SIZE = 200
 const TOTAL_SCAN_LIMIT = 1000
 
 const REQUEST_BASE = 'http://opcos-console.internal'
+
+/** gzip 阈值：响应体 > 1KB 才压缩（更小的包压缩后常不降反升） */
+const GZIP_MIN_BYTES = 1024
+/** 值得压缩的静态文本扩展名（图片/字体本就压缩，跳过） */
+const GZIPPABLE_EXT = /\.(?:html|js|mjs|css|json|map|svg|txt)$/
 
 /* ─────────────── 插件服务的结构子集（运行时经 getService 解析） ─────────────── */
 
@@ -77,6 +87,31 @@ interface RevenueLedger {
   creatorBalance(authorId: string): number
   /** 全量分成流水（只读快照） */
   listEntries(): readonly SplitEntry[]
+}
+
+/** Content Engine 服务（opc.content 的结构子集，PRD 6.3 系统三） */
+interface ContentService {
+  /** 选题 → 撰写 → 审核 → 分发 全流程（LLM 模式下可能耗时数秒） */
+  run(): Promise<PipelineRunResult>
+  /** 观测用：run 调用计数（含失败） */
+  stats(): { runs: number }
+  /** 生效模式（不回传任何密钥） */
+  mode(): { llm: boolean; hotSearch: boolean }
+}
+
+/** 共享任务板服务（opc.team.board 的结构子集，core TaskBoard 同形，AS-04） */
+interface TeamBoardService {
+  /** 新增 pending 任务（版本从 1 起） */
+  add(title: string, expectedListVersion?: number): Task
+  /** 任务清单，按 createdAt 升序 */
+  list(): Task[]
+  /** 认领：pending→claimed；非 pending 或版本过期抛 ConflictError */
+  claim(taskId: string, member: string, expectedVersion: number): Task
+  /** 完成：claimed→done；仅认领者本人可完成（他人抛 PermissionError） */
+  complete(taskId: string, member: string, result: string, expectedVersion: number): Task
+  /** 阻塞：任意状态→blocked，原因存 result */
+  block(taskId: string, member: string, reason: string, expectedVersion: number): Task
+  stats(): { total: number; pending: number; claimed: number; done: number; blocked: number }
 }
 
 /* ─────────────── 预置示例技能（库空时灌入市场索引 + 签名包仓库） ─────────────── */
@@ -190,9 +225,12 @@ const ERROR_STATUS: Record<string, number> = {
   ORDER_NOT_FOUND: 404,
   SKILL_NOT_FOUND: 404,
   NOT_FOUND: 404,
+  TASK_NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   VERSION_CONFLICT: 409,
   ORDER_STATE_INVALID: 409,
+  NO_DRAFTS: 409,
+  CONTENT_REVIEW_REJECTED: 422,
   PAYLOAD_TOO_LARGE: 413,
   TOKEN_BUDGET_EXCEEDED: 429,
   SERVICE_UNAVAILABLE: 503,
@@ -242,28 +280,37 @@ const PLACEHOLDER_HTML = `<!doctype html>
 /**
  * 静态目录：优先 import.meta.url 相对的 ../static/；
  * dist 运行时（tsc 不拷贝静态资源）回退到源码包的 static/。
+ * 以 index.html 为准裁决：dist 形态下 ../static/ 可能只含编译落地的 *.test.js
+ * （static/ 目录同样被 node:test 收纳），缺前端文件时必须回退源码目录。
  */
 export function resolveStaticDir(): string {
   const primary = fileURLToPath(new URL('../static', import.meta.url))
-  if (existsSync(primary)) return primary
+  if (existsSync(join(primary, 'index.html'))) return primary
   const fromDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/opcos-console/static')
-  if (existsSync(fromDist)) return fromDist
+  if (existsSync(join(fromDist, 'index.html'))) return fromDist
   return primary
 }
 
-function sendFile(res: ServerResponse, status: number, filePath: string): void {
+function sendFile(req: IncomingMessage, res: ServerResponse, status: number, filePath: string): void {
   const contentType = CONTENT_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+  const raw = readFileSync(filePath)
   // 控制台追求即时生效：禁用浏览器启发式缓存（曾发生 app.js 陈旧事故），
-  // hosted 模式下静态文件热读源码目录，禁存保证 API 代码重启后前端立刻同步
+  // hosted 模式下静态文件热读源码目录，禁存保证 API 代码重启后前端立刻同步；
+  // >1KB 的文本类型在客户端接受时 gzip（app.js/style.css 约数十 KB，收益明显）
+  const compress =
+    raw.length > GZIP_MIN_BYTES && GZIPPABLE_EXT.test(extname(filePath).toLowerCase()) && acceptsGzip(req)
+  const payload = compress ? gzipSync(raw) : raw
   res.writeHead(status, {
     'content-type': contentType,
     'cache-control': 'no-store',
+    ...(compress ? { 'content-length': String(payload.length) } : {}),
+    ...gzipHeaders(compress),
   })
-  res.end(readFileSync(filePath))
+  res.end(payload)
 }
 
-function sendStaticNotFound(res: ServerResponse, pathname: string): void {
-  sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `no such path: ${pathname}` } })
+function sendStaticNotFound(req: IncomingMessage, res: ServerResponse, pathname: string): void {
+  sendJson(req, res, 404, { error: { code: 'NOT_FOUND', message: `no such path: ${pathname}` } })
 }
 
 /* ─────────────── 运行时组装（deps → setup） ─────────────── */
@@ -292,6 +339,11 @@ export interface ConsoleDeps {
   quarantineFile: string
   /** 埋点环形数组（由 subscribeTelemetry 维护，owner 负责生命周期） */
   telemetry: TelemetryEvent[]
+  /**
+   * content_publish 环形数组（可选）：createApiSetup 阶段订阅 'opc.content.events'
+   * 维护，容量 CONTENT_EVENTS_RING_CAPACITY；owner 经 setup.disposeContentEvents() 退订。
+   */
+  contentEvents?: TelemetryEvent[]
   /** 健康来源：缺省时按服务可用性实时探测（probeHandshake） */
   handshake?: HandshakeSource
   /** 静态目录：缺省 resolveStaticDir() */
@@ -309,6 +361,10 @@ export interface ConsoleSetup {
   installedDir: string
   billingLogFile: string
   telemetry: TelemetryEvent[]
+  /** content_publish 环形数组（createApiSetup 阶段开始订阅维护） */
+  contentEvents: TelemetryEvent[]
+  /** 退订 content_publish 订阅（owner 关停时调用；幂等） */
+  disposeContentEvents(): void
   staticDir: string
 }
 
@@ -323,6 +379,10 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
       : deps.handshake
         ? () => deps.handshake as HandshakeReport
         : () => probeHandshake(deps.getService)
+  // content_publish 环形缓冲：此处订阅（宿主装载插件先行，'opc.content.events' 已就位；
+  // 插件缺席时 subscribeContentEvents 返回幂等退订，端点降级为空列表而非 503）
+  const contentEvents = deps.contentEvents ?? []
+  const offContentEvents = subscribeContentEvents(deps.getService, contentEvents)
   return {
     getService: deps.getService,
     handshake,
@@ -333,6 +393,10 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
     installedDir: deps.installedDir,
     billingLogFile: deps.billingLogFile,
     telemetry: deps.telemetry,
+    contentEvents,
+    disposeContentEvents: () => {
+      offContentEvents()
+    },
     staticDir: deps.staticDir ?? resolveStaticDir(),
   }
 }
@@ -406,32 +470,72 @@ export function subscribeTelemetry(
   return unsubs
 }
 
+/**
+ * content_publish 订阅（PRD 7.5）：订阅 'opc.content.events' 总线进环形数组，
+ * 供 GET /api/content/events 展示最近发布事件。总线缺席（插件隔离）→ 幂等退订。
+ */
+export function subscribeContentEvents(
+  getService: (name: string) => unknown,
+  ring: TelemetryEvent[],
+  capacity: number = CONTENT_EVENTS_RING_CAPACITY,
+): () => void {
+  const bus = getService('opc.content.events') as TelemetryBus | undefined
+  if (!bus || typeof bus.subscribe !== 'function') return () => {}
+  return bus.subscribe((event) => {
+    ring.push(event)
+    if (ring.length > capacity) ring.shift()
+  })
+}
+
 /* ─────────────── 请求级辅助 ─────────────── */
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+/** 请求 Accept-Encoding 是否明确接受 gzip（仅认显式 gzip 与 x-gzip 条目；通配符星号与 identity 均视为不接受） */
+function acceptsGzip(req: IncomingMessage): boolean {
+  const header = req.headers['accept-encoding']
+  if (typeof header !== 'string') return false
+  return header.split(',').some((part) => {
+    const token = (part.split(';')[0] ?? '').trim().toLowerCase()
+    return token === 'gzip' || token === 'x-gzip'
+  })
+}
+
+/** gzip 条件压缩头：仅压缩时带 content-encoding；vary 恒带（响应随 Accept-Encoding 变化） */
+function gzipHeaders(compressed: boolean): Record<string, string> {
+  return compressed ? { 'content-encoding': 'gzip', vary: 'Accept-Encoding' } : { vary: 'Accept-Encoding' }
+}
+
+function sendJson(req: IncomingMessage, res: ServerResponse, status: number, body: unknown): void {
   if (res.headersSent) {
     res.destroy()
     return
   }
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(body))
+  const raw = Buffer.from(JSON.stringify(body), 'utf8')
+  // >1KB 且客户端接受 gzip → gzipSync 压缩（一次性缓冲，控制台响应体量级足够）
+  const compress = raw.length > GZIP_MIN_BYTES && acceptsGzip(req)
+  const payload = compress ? gzipSync(raw) : raw
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    ...(compress ? { 'content-length': String(payload.length) } : {}),
+    ...gzipHeaders(compress),
+  })
+  res.end(payload)
 }
 
-function sendError(res: ServerResponse, error: unknown): void {
+function sendError(req: IncomingMessage, res: ServerResponse, error: unknown): void {
   if (res.headersSent) {
     res.destroy()
     return
   }
   if (error instanceof OpcError) {
-    sendJson(res, ERROR_STATUS[error.code] ?? 500, { error: { code: error.code, message: error.message } })
+    sendJson(req, res, ERROR_STATUS[error.code] ?? 500, { error: { code: error.code, message: error.message } })
     return
   }
   if (error instanceof RangeError) {
-    sendJson(res, 400, { error: { code: 'VALIDATION_ERROR', message: error.message } })
+    sendJson(req, res, 400, { error: { code: 'VALIDATION_ERROR', message: error.message } })
     return
   }
   const message = error instanceof Error ? error.message : String(error)
-  sendJson(res, 500, { error: { code: 'INTERNAL_ERROR', message } })
+  sendJson(req, res, 500, { error: { code: 'INTERNAL_ERROR', message } })
 }
 
 function requireService<T>(setup: ConsoleSetup, name: string): T {
@@ -582,6 +686,35 @@ function isNetPositive(status: Order['status']): boolean {
   return status === 'paid' || status === 'delivered'
 }
 
+/**
+ * 任务板变更统一出口：成功回 Task；VERSION_CONFLICT → 409 并在 error.current 附
+ * 当前任务快照（前端据此展示胜者并回填版本）；PermissionError 等其余错误原样上抛，
+ * 走 ERROR_STATUS 映射（PERMISSION_DENIED → 403、TASK_NOT_FOUND → 404）。
+ */
+async function respondBoardMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  taskBoard: TeamBoardService,
+  taskId: string,
+  mutate: () => Task,
+): Promise<void> {
+  try {
+    sendJson(req, res, 200, mutate())
+  } catch (error) {
+    if (error instanceof OpcError && error.code === 'VERSION_CONFLICT') {
+      sendJson(req, res, 409, {
+        error: {
+          code: 'VERSION_CONFLICT',
+          message: error.message,
+          current: taskBoard.list().find((t) => t.id === taskId) ?? null,
+        },
+      })
+      return
+    }
+    throw error
+  }
+}
+
 /* ─────────────── 路由 ─────────────── */
 
 const API_PATHS = new Set([
@@ -589,8 +722,17 @@ const API_PATHS = new Set([
   '/api/team',
   '/api/team/templates',
   '/api/blackboard',
+  '/api/board',
+  '/api/board/add',
+  '/api/board/claim',
+  '/api/board/complete',
+  '/api/board/block',
+  '/api/content/run',
+  '/api/content/stats',
+  '/api/content/events',
   '/api/skills',
   '/api/skills/install',
+  '/api/skills/publish-draft',
   '/api/skillforge/drafts',
   '/api/orders',
   '/api/orders/pay',
@@ -625,7 +767,7 @@ async function dispatchApi(
   switch (`${method} ${path}`) {
     case 'GET /api/health': {
       const outcomes = setup.handshake().outcomes
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         ok: outcomes.every((o) => o.status === 'loaded'),
         runtime: detectDshRuntime(),
         plugins: outcomes.map((o) => ({ name: o.name, ok: o.status === 'loaded' })),
@@ -641,20 +783,20 @@ async function dispatchApi(
         throw new OpcError('GOAL_PARSE_FAILED', `无法解析创业目标: ${JSON.stringify(goal)}`)
       }
       const team = requireService<TeamService>(setup, 'opc.team')
-      sendJson(res, 200, team.formTeam(goal))
+      sendJson(req, res, 200, team.formTeam(goal))
       return
     }
 
     case 'GET /api/team/templates': {
       const team = requireService<TeamService>(setup, 'opc.team')
-      sendJson(res, 200, { templates: team.fallbackTemplates() })
+      sendJson(req, res, 200, { templates: team.fallbackTemplates() })
       return
     }
 
     case 'GET /api/blackboard': {
       const scope = queryOneOf(url, 'scope', ['global', 'workflow'] as const, 'global')
       const board = requireService<BlackboardService>(setup, 'opc.blackboard')
-      sendJson(res, 200, { entries: board.read(scope) })
+      sendJson(req, res, 200, { entries: board.read(scope) })
       return
     }
 
@@ -670,7 +812,79 @@ async function dispatchApi(
         expectedVersion: requireNonNegativeInt(body, 'expectedVersion'),
         ...optionalConfidence(body),
       }
-      sendJson(res, 200, board.write(op))
+      sendJson(req, res, 200, board.write(op))
+      return
+    }
+
+    case 'GET /api/board': {
+      const taskBoard = requireService<TeamBoardService>(setup, 'opc.team.board')
+      sendJson(req, res, 200, { tasks: taskBoard.list(), stats: taskBoard.stats() })
+      return
+    }
+
+    case 'POST /api/board/add': {
+      const body = await readJsonObject(req)
+      const taskBoard = requireService<TeamBoardService>(setup, 'opc.team.board')
+      sendJson(req, res, 200, taskBoard.add(requireString(body, 'title')))
+      return
+    }
+
+    case 'POST /api/board/claim': {
+      const body = await readJsonObject(req)
+      const taskBoard = requireService<TeamBoardService>(setup, 'opc.team.board')
+      const taskId = requireString(body, 'taskId')
+      await respondBoardMutation(req, res, taskBoard, taskId, () =>
+        taskBoard.claim(taskId, requireString(body, 'member'), requireNonNegativeInt(body, 'expectedVersion')),
+      )
+      return
+    }
+
+    case 'POST /api/board/complete': {
+      const body = await readJsonObject(req)
+      const taskBoard = requireService<TeamBoardService>(setup, 'opc.team.board')
+      const taskId = requireString(body, 'taskId')
+      await respondBoardMutation(req, res, taskBoard, taskId, () =>
+        taskBoard.complete(
+          taskId,
+          requireString(body, 'member'),
+          requireString(body, 'result'),
+          requireNonNegativeInt(body, 'expectedVersion'),
+        ),
+      )
+      return
+    }
+
+    case 'POST /api/board/block': {
+      const body = await readJsonObject(req)
+      const taskBoard = requireService<TeamBoardService>(setup, 'opc.team.board')
+      const taskId = requireString(body, 'taskId')
+      await respondBoardMutation(req, res, taskBoard, taskId, () =>
+        taskBoard.block(
+          taskId,
+          requireString(body, 'member'),
+          requireString(body, 'reason'),
+          requireNonNegativeInt(body, 'expectedVersion'),
+        ),
+      )
+      return
+    }
+
+    case 'POST /api/content/run': {
+      // 选题→撰写→审核→分发全链路（LLM 模式可能耗时数秒，直接 await 由前端 loading）
+      const content = requireService<ContentService>(setup, 'opc.content')
+      sendJson(req, res, 200, await content.run())
+      return
+    }
+
+    case 'GET /api/content/stats': {
+      const content = requireService<ContentService>(setup, 'opc.content')
+      sendJson(req, res, 200, { ...content.stats(), mode: content.mode() })
+      return
+    }
+
+    case 'GET /api/content/events': {
+      // 最近 content_publish 事件（环形缓冲，createApiSetup 阶段订阅维护；时间正序）
+      sendJson(req, res, 200, { events: [...setup.contentEvents] })
       return
     }
 
@@ -681,7 +895,7 @@ async function dispatchApi(
       const limit = parseLimit(url.searchParams.get('limit'), DEFAULT_SKILL_PAGE_SIZE, MAX_SKILL_PAGE_SIZE)
       // 先取全量命中（受 TOTAL_SCAN_LIMIT 上限约束）以计算 total，再切页
       const matched = setup.skillsIndex.search({ keyword, category, compatDsh, limit: TOTAL_SCAN_LIMIT })
-      sendJson(res, 200, { results: matched.slice(0, limit), total: matched.length })
+      sendJson(req, res, 200, { results: matched.slice(0, limit), total: matched.length })
       return
     }
 
@@ -695,13 +909,50 @@ async function dispatchApi(
         skillId,
         setup.installedDir,
       )
-      sendJson(res, 200, { installedPath })
+      sendJson(req, res, 200, { installedPath })
+      return
+    }
+
+    case 'POST /api/skills/publish-draft': {
+      // 草案→上架工作流：skillforge 首个草案 → 打包 → Ed25519 重新签名取公钥 → 市场索引
+      const body = await readJsonObject(req)
+      const forge = requireService<SkillForgeService>(setup, 'opc.skillforge')
+      const draft = forge.listDrafts()[0]
+      if (!draft) {
+        throw new OpcError('NO_DRAFTS', 'skillforge has no distilled drafts (repeat similar workflows to create one)')
+      }
+      const authorId = typeof body.authorId === 'string' && body.authorId.length > 0 ? body.authorId : 'console-creator'
+      // SF-04 打包信封（走 forge 路径）；再按示例 Skill 同模式重新签名取得本次公钥
+      forge.packageDraft(draft, authorId)
+      const { pkg, keys } = createPackage(draft, authorId)
+      const entry: MarketSkill = {
+        id: pkg.manifest.skillId,
+        name: pkg.manifest.name,
+        version: pkg.manifest.version,
+        authorId,
+        price: 990,
+        category: 'community',
+        downloads: 0,
+        rating: 0,
+        createdAt: pkg.manifest.createdAt,
+        compat: { dsh: '>=0.1.0-rc.7' },
+      }
+      setup.skillsIndex.upsert(entry)
+      sendJson(req, res, 200, {
+        skillId: entry.id,
+        name: entry.name,
+        version: entry.version,
+        authorId,
+        price: entry.price,
+        category: entry.category,
+        publicKeyPem: keys.publicKeyPem,
+      })
       return
     }
 
     case 'GET /api/skillforge/drafts': {
       const forge = requireService<SkillForgeService>(setup, 'opc.skillforge')
-      sendJson(res, 200, { drafts: forge.listDrafts() })
+      sendJson(req, res, 200, { drafts: forge.listDrafts() })
       return
     }
 
@@ -717,7 +968,7 @@ async function dispatchApi(
         amount: requirePositiveInt(body, 'amountCents'),
         ...(marketEntry ? { authorId: marketEntry.authorId } : {}),
       })
-      sendJson(res, 200, order)
+      sendJson(req, res, 200, order)
       return
     }
 
@@ -725,7 +976,7 @@ async function dispatchApi(
       const body = await readJsonObject(req)
       const pay = requireService<MarketplacePay>(setup, 'opc.marketplace.pay')
       const { order, split } = await pay(requireString(body, 'orderId'))
-      sendJson(res, 200, { order, split })
+      sendJson(req, res, 200, { order, split })
       return
     }
 
@@ -733,7 +984,7 @@ async function dispatchApi(
       const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
       if (!buyerId) throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
       const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
-      sendJson(res, 200, { orders: orders.listByBuyer(buyerId) })
+      sendJson(req, res, 200, { orders: orders.listByBuyer(buyerId) })
       return
     }
 
@@ -751,7 +1002,7 @@ async function dispatchApi(
       const creators = [...byAuthor.entries()]
         .map(([authorId, agg]) => ({ authorId, balance: agg.balance, splits: agg.splits, lastAt: agg.lastAt }))
         .sort((a, b) => b.balance - a.balance || a.authorId.localeCompare(b.authorId))
-      sendJson(res, 200, { creators, unit: 'cents' })
+      sendJson(req, res, 200, { creators, unit: 'cents' })
       return
     }
 
@@ -762,7 +1013,7 @@ async function dispatchApi(
       const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
       const list = orders.listByBuyer(buyerId).sort((a, b) => b.createdAt - a.createdAt)
       const totalSpentCents = list.filter((o) => isNetPositive(o.status)).reduce((sum, o) => sum + o.amount, 0)
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         buyerId,
         orders: list,
         totalSpent: totalSpentCents,
@@ -791,7 +1042,7 @@ async function dispatchApi(
         orderNetAmountCents += order.amount
       }
       const raasRevenueYuan = billing ? billing.totalRevenue() : 0
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         buyers: [...byBuyer.entries()]
           .map(([buyerId, agg]) => ({ buyerId, orders: agg.orders, spent: agg.spent }))
           .sort((a, b) => b.spent - a.spent || a.buyerId.localeCompare(b.buyerId)),
@@ -812,7 +1063,7 @@ async function dispatchApi(
 
     case 'GET /api/billing/summary': {
       const engine = requireService<BillingEngine>(setup, 'opc.billing')
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         records: readBillingRecords(setup.billingLogFile).slice(-20).reverse(),
         totalRevenue: engine.totalRevenue(),
       })
@@ -827,7 +1078,7 @@ async function dispatchApi(
         agentId: requireString(body, 'agentId'),
         resolution: requireOneOf(body, 'resolution', ['resolved', 'escalated'] as const),
       })
-      sendJson(res, 200, record)
+      sendJson(req, res, 200, record)
       return
     }
 
@@ -838,7 +1089,7 @@ async function dispatchApi(
         category: nonEmptyParam(url.searchParams.get('category')) as MemoryQuery['category'],
         limit: 50,
       })
-      sendJson(res, 200, { entries })
+      sendJson(req, res, 200, { entries })
       return
     }
 
@@ -851,7 +1102,7 @@ async function dispatchApi(
         content: requireString(body, 'content'),
         confidence: requireConfidence(body),
       })
-      sendJson(res, 200, entry)
+      sendJson(req, res, 200, entry)
       return
     }
 
@@ -862,7 +1113,7 @@ async function dispatchApi(
       const memory = setup.getService('opc.memory') as MemoryService | undefined
       const orders = setup.getService('opc.marketplace.orders') as OrderEngine | undefined
       const billing = setup.getService('opc.billing') as BillingEngine | undefined
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         team: { templates: team ? team.fallbackTemplates().length : 0 },
         blackboard: {
           global: board ? board.read('global').length : 0,
@@ -886,7 +1137,7 @@ async function dispatchApi(
           .listEntries()
           .filter((e) => e.authorId === authorId)
           .sort((a, b) => b.recordedAt - a.recordedAt)
-        sendJson(res, 200, { authorId, balance: revenue.creatorBalance(authorId), entries })
+        sendJson(req, res, 200, { authorId, balance: revenue.creatorBalance(authorId), entries })
         return
       }
       if (API_PATHS.has(path) || (method !== 'GET' && path.startsWith('/api/creators/'))) {
@@ -898,7 +1149,8 @@ async function dispatchApi(
 }
 
 /**
- * 20 个 REST 端点（含 SF-07 创作者中心 / DE-08 客户账单 4 条）+ OpcError → {error:{code,message}} 映射
+ * REST 端点分发（市场/计费/创作者/账单 + Content Engine 3 条 + 任务板 5 条 + 草案上架 1 条）
+ * + OpcError → {error:{code,message}} 映射
  * （原 handleRequest 的 API 半区）。
  * @param urlPrefix hosted 模式传挂载前缀（如 '/opcos'），从 pathname 剥离后再匹配 /api/*
  */
@@ -916,16 +1168,16 @@ export async function handleApiRequest(
     }
     await dispatchApi(url, path, req, res, setup)
   } catch (error) {
-    sendError(res, error)
+    sendError(req, res, error)
   }
 }
 
 /** 静态资源（原 serveStatic：/ → index.html/占位页，其余按 safe 路径映射文件，缺失 404 JSON） */
-function serveStaticPath(pathname: string, res: ServerResponse, setup: ConsoleSetup): void {
+function serveStaticPath(pathname: string, req: IncomingMessage, res: ServerResponse, setup: ConsoleSetup): void {
   if (pathname === '/') {
     const indexPath = join(setup.staticDir, 'index.html')
     if (existsSync(indexPath)) {
-      sendFile(res, 200, indexPath)
+      sendFile(req, res, 200, indexPath)
       return
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -934,15 +1186,15 @@ function serveStaticPath(pathname: string, res: ServerResponse, setup: ConsoleSe
   }
   const relative = pathname.replace(/^\/+/, '')
   if (relative.length === 0 || relative.includes('..') || relative.includes('\\') || relative.includes('\0')) {
-    sendStaticNotFound(res, pathname)
+    sendStaticNotFound(req, res, pathname)
     return
   }
   const filePath = join(setup.staticDir, relative)
   if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-    sendStaticNotFound(res, pathname)
+    sendStaticNotFound(req, res, pathname)
     return
   }
-  sendFile(res, 200, filePath)
+  sendFile(req, res, 200, filePath)
 }
 
 /**
@@ -957,9 +1209,9 @@ export async function serveStatic(
 ): Promise<void> {
   try {
     const url = new URL(req.url ?? '/', REQUEST_BASE)
-    serveStaticPath(stripUrlPrefix(url.pathname, urlPrefix), res, setup)
+    serveStaticPath(stripUrlPrefix(url.pathname, urlPrefix), req, res, setup)
   } catch (error) {
-    sendError(res, error)
+    sendError(req, res, error)
   }
 }
 
@@ -973,6 +1225,6 @@ export async function handleConsoleRequest(req: IncomingMessage, res: ServerResp
       await serveStatic(req, res, setup)
     }
   } catch (error) {
-    sendError(res, error)
+    sendError(req, res, error)
   }
 }

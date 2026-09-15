@@ -7,9 +7,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { TestContext } from 'node:test'
+import { request } from 'node:http'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gunzipSync } from 'node:zlib'
 import { startConsole, type RunningConsole } from './server.js'
 
 interface HealthBody {
@@ -29,11 +31,15 @@ interface OverviewBody {
   telemetry: { recent: Array<{ type: string }> }
 }
 
-/** 每用例独立 tmpdir + startConsole({port:0})；t.after 按 LIFO 先 close 再删目录 */
-async function launch(t: TestContext): Promise<{ url: string; dataDir: string }> {
+/** 每用例独立 tmpdir + startConsole({port:0})；t.after 按 LIFO 先 close 再删目录。
+ *  opts.onReady 透传给 startConsole（测试钩子：暴露宿主 getService，用于预置插件内部状态）。 */
+async function launch(
+  t: TestContext,
+  opts: { onReady?: (getService: (name: string) => unknown) => void } = {},
+): Promise<{ url: string; dataDir: string }> {
   const dataDir = mkdtempSync(join(tmpdir(), 'opcos-console-'))
   t.after(() => rmSync(dataDir, { recursive: true, force: true }))
-  const con: RunningConsole = await startConsole({ port: 0, host: '127.0.0.1', dataDir })
+  const con: RunningConsole = await startConsole({ port: 0, host: '127.0.0.1', dataDir, onReady: opts.onReady })
   t.after(() => con.close())
   return { url: con.url, dataDir }
 }
@@ -61,7 +67,15 @@ test('console: /api/health 全插件握手 + /api/overview 聚合 + 静态占位
   assert.equal(health.body.runtime.apiLevel, 'cordis-4')
   assert.deepEqual(
     health.body.plugins.map((p) => p.name).sort(),
-    ['opc-billing', 'opc-blackboard', 'opc-marketplace', 'opc-memory', 'opc-skill-forge', 'opc-team'],
+    [
+      'opc-billing',
+      'opc-blackboard',
+      'opc-content',
+      'opc-marketplace',
+      'opc-memory',
+      'opc-skill-forge',
+      'opc-team',
+    ],
   )
   assert.ok(health.body.plugins.every((p) => p.ok))
   assert.deepEqual(health.body.quarantined, [])
@@ -462,4 +476,270 @@ test('console: SF-07/DE-08 创作者中心与客户账单聚合（/api/creators�
   assert.equal(buyer1Agg.spent, 1590)
   assert.equal(buyer2Agg.orders, 1, 'pending 单不计入汇总买家笔数')
   assert.equal(buyer2Agg.spent, 500)
+})
+
+/* ─────────────── P1：Content Engine / 任务板 / 草案上架 ─────────────── */
+
+interface ContentRunBody {
+  brief: { title: string; angle: string; personaScore: number; differentiation?: string[] }
+  review: { pass: boolean; score: number; violations: Array<{ type: string; severity: string; detail: string }> }
+  publish: { platform: string; url: string; success: boolean }
+  rewrites: number
+  durationMs: number
+  success: boolean
+}
+
+test('console: /api/content 流水线运行、stats 与 content_publish 事件环形缓冲', async (t) => {
+  const { url } = await launch(t)
+
+  const before = await getJson<{ events: unknown[] }>(`${url}api/content/events`)
+  assert.equal(before.status, 200)
+  assert.deepEqual(before.body.events, [])
+
+  // 默认模板策略（未配 key）秒级返回
+  const run = await postJson<ContentRunBody>(`${url}api/content/run`, {})
+  assert.equal(run.status, 200)
+  assert.equal(run.body.success, true)
+  assert.equal(run.body.publish.success, true)
+  assert.match(run.body.publish.url, /^https:\/\/mp\.weixin\.qq\.com\/s\//)
+  assert.ok(run.body.brief.title.length > 0)
+  assert.ok(run.body.durationMs >= 0)
+  assert.equal(run.body.review.pass, true)
+  assert.deepEqual(run.body.review.violations, [])
+
+  const stats = await getJson<{ runs: number; mode: { llm: boolean; hotSearch: boolean } }>(
+    `${url}api/content/stats`,
+  )
+  assert.equal(stats.status, 200)
+  assert.equal(stats.body.runs, 1)
+  assert.equal(typeof stats.body.mode.llm, 'boolean')
+  assert.equal(typeof stats.body.mode.hotSearch, 'boolean')
+
+  const events = await getJson<{
+    events: Array<{ type: string; timestamp: number; payload: { title?: string; platform?: string } }>
+  }>(`${url}api/content/events`)
+  assert.equal(events.status, 200)
+  assert.equal(events.body.events.length, 1)
+  const event = events.body.events[0]
+  assert.equal(event?.type, 'content_publish')
+  assert.ok(event && event.payload.title && event.payload.title.length > 0)
+  assert.equal(event?.payload.platform, 'wechat')
+  assert.ok(event && event.timestamp > 0)
+})
+
+interface TaskBody {
+  id: string
+  title: string
+  status: string
+  claimedBy?: string
+  result?: string
+  version: number
+}
+
+test('console: /api/board 生命周期（add→claim→complete）+ 乐观锁 409 快照 + 越权 403', async (t) => {
+  const { url } = await launch(t)
+
+  const board0 = await getJson<{ tasks: TaskBody[]; stats: Record<string, number> }>(`${url}api/board`)
+  assert.equal(board0.status, 200)
+  assert.deepEqual(board0.body.tasks, [])
+  assert.deepEqual(board0.body.stats, { total: 0, pending: 0, claimed: 0, done: 0, blocked: 0 })
+
+  const invalid = await postJson<{ error: { code: string } }>(`${url}api/board/add`, { title: '' })
+  assert.equal(invalid.status, 400)
+  assert.equal(invalid.body.error.code, 'VALIDATION_ERROR')
+
+  const added = await postJson<TaskBody>(`${url}api/board/add`, { title: '写周报' })
+  assert.equal(added.status, 200)
+  assert.equal(added.body.status, 'pending')
+  assert.equal(added.body.version, 1)
+  const taskId = added.body.id
+
+  // 过期 expectedVersion 认领 → 409 VERSION_CONFLICT + current 任务快照
+  const conflict = await postJson<{ error: { code: string; current: TaskBody | null } }>(`${url}api/board/claim`, {
+    taskId,
+    member: 'op',
+    expectedVersion: 99,
+  })
+  assert.equal(conflict.status, 409)
+  assert.equal(conflict.body.error.code, 'VERSION_CONFLICT')
+  assert.equal(conflict.body.error.current?.version, 1)
+  assert.equal(conflict.body.error.current?.status, 'pending')
+
+  // 正常认领：pending → claimed（claimedBy 记录成员，版本 +1）
+  const claimed = await postJson<TaskBody>(`${url}api/board/claim`, { taskId, member: 'op', expectedVersion: 1 })
+  assert.equal(claimed.status, 200)
+  assert.equal(claimed.body.status, 'claimed')
+  assert.equal(claimed.body.claimedBy, 'op')
+  assert.equal(claimed.body.version, 2)
+
+  // 他人代完成 → 403 PERMISSION_DENIED
+  const denied = await postJson<{ error: { code: string } }>(`${url}api/board/complete`, {
+    taskId,
+    member: 'alice',
+    result: '抢答',
+    expectedVersion: 2,
+  })
+  assert.equal(denied.status, 403)
+  assert.equal(denied.body.error.code, 'PERMISSION_DENIED')
+
+  // 认领者本人完成：claimed → done（结果入库，版本 +1）
+  const done = await postJson<TaskBody>(`${url}api/board/complete`, {
+    taskId,
+    member: 'op',
+    result: '周报已发',
+    expectedVersion: 2,
+  })
+  assert.equal(done.status, 200)
+  assert.equal(done.body.status, 'done')
+  assert.equal(done.body.result, '周报已发')
+  assert.equal(done.body.version, 3)
+
+  // 不存在的任务 → 404 TASK_NOT_FOUND
+  const missing = await postJson<{ error: { code: string } }>(`${url}api/board/claim`, {
+    taskId: '00000000-0000-0000-0000-000000000000',
+    member: 'op',
+    expectedVersion: 1,
+  })
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error.code, 'TASK_NOT_FOUND')
+
+  const board1 = await getJson<{ tasks: TaskBody[]; stats: Record<string, number> }>(`${url}api/board`)
+  assert.equal(board1.body.tasks.length, 1)
+  assert.equal(board1.body.tasks[0]?.status, 'done')
+  assert.deepEqual(board1.body.stats, { total: 1, pending: 0, claimed: 0, done: 1, blocked: 0 })
+})
+
+test('console: /api/skills/publish-draft 草案上架 + 无草案 409 NO_DRAFTS', async (t) => {
+  let getService: ((name: string) => unknown) | undefined
+  const { url } = await launch(t, {
+    onReady: (fn) => {
+      getService = fn
+    },
+  })
+
+  // 库空无草案 → 409 NO_DRAFTS
+  const none = await postJson<{ error: { code: string } }>(`${url}api/skills/publish-draft`, {})
+  assert.equal(none.status, 409)
+  assert.equal(none.body.error.code, 'NO_DRAFTS')
+
+  // 预置：同一任务签名 + 同一工具序列成功观测 3 次（默认 minRepetitions=3）→ high 置信度蒸馏草案
+  const forge = getService?.('opc.skillforge') as
+    | {
+        observe(observation: { taskSignature: string; tools: string[]; success: boolean; timestamp: number }): void
+        listDrafts(): Array<{ name: string; version: string }>
+      }
+    | undefined
+  assert.ok(forge, 'onReady 钩子应暴露宿主 opc.skillforge 服务')
+  for (let i = 0; i < 3; i++) {
+    forge.observe({
+      taskSignature: 'weekly-report',
+      tools: ['outline', 'draft', 'export'],
+      success: true,
+      timestamp: 1_750_000_000_000 + i,
+    })
+  }
+  const drafts = forge.listDrafts()
+  assert.equal(drafts.length, 1)
+  const draftName = drafts[0]?.name
+  assert.equal(draftName, 'skill-weekly-report-3steps')
+
+  const published = await postJson<{
+    skillId: string
+    name: string
+    version: string
+    authorId: string
+    category: string
+    price: number
+    publicKeyPem: string
+  }>(`${url}api/skills/publish-draft`, {})
+  assert.equal(published.status, 200)
+  assert.equal(published.body.skillId, 'skill-weekly-report-3steps')
+  assert.equal(published.body.name, 'skill-weekly-report-3steps')
+  assert.equal(published.body.authorId, 'console-creator', '缺省 authorId 落 console-creator')
+  assert.ok(published.body.publicKeyPem.includes('BEGIN PUBLIC KEY'), '应返回本次签名的 Ed25519 公钥')
+
+  // 市场索引可搜到：community 分类 / 990 分 / compat 基线
+  const search = await getJson<{
+    total: number
+    results: Array<{ id: string; category: string; price: number; compat: { dsh: string } }>
+  }>(`${url}api/skills?q=weekly-report`)
+  assert.equal(search.status, 200)
+  assert.equal(search.body.total, 1)
+  const entry = search.body.results[0]
+  assert.equal(entry?.id, 'skill-weekly-report-3steps')
+  assert.equal(entry?.category, 'community')
+  assert.equal(entry?.price, 990)
+  assert.equal(entry?.compat.dsh, '>=0.1.0-rc.7')
+
+  // 自定义 authorId 透传（重复上架为幂等 upsert）
+  const republished = await postJson<{ skillId: string; authorId: string }>(`${url}api/skills/publish-draft`, {
+    authorId: 'creator-zed',
+  })
+  assert.equal(republished.status, 200)
+  assert.equal(republished.body.authorId, 'creator-zed')
+})
+
+/* ─────────────── P2：gzip 压缩（>1KB JSON / 静态文本，按 accept-encoding） ─────────────── */
+
+/** 裸 node:http 请求：精确控制 accept-encoding（undici fetch 默认附带 gzip，无法测 identity 路径） */
+function rawRequest(
+  target: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
+  return new Promise((resolveReq, rejectReq) => {
+    const req = request(target, { method: opts.method ?? 'GET', headers: opts.headers ?? {} }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        resolveReq({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) })
+      })
+    })
+    req.on('error', rejectReq)
+    if (opts.body !== undefined) req.write(opts.body)
+    req.end()
+  })
+}
+
+test('console: gzip —— >1KB JSON 与静态文本压缩（解压后内容一致），identity 客户端不受影响', async (t) => {
+  const { url } = await launch(t)
+
+  // /api/team 回显 goal：长目标（含“电商”关键词命中解析规则）→ 响应 > 2KB
+  const goal = `跨境电商独立站创业：选品、流量与转化细节。`.repeat(60)
+
+  // 接受 gzip 的客户端：content-encoding: gzip + vary: Accept-Encoding，解压后内容一致
+  const gzipped = await rawRequest(`${url}api/team`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'accept-encoding': 'gzip' },
+    body: JSON.stringify({ goal }),
+  })
+  assert.equal(gzipped.status, 200)
+  assert.equal(gzipped.headers['content-encoding'], 'gzip')
+  assert.equal(gzipped.headers['vary'], 'Accept-Encoding')
+  const inflated = JSON.parse(gunzipSync(gzipped.body).toString('utf8')) as { goal: string }
+  assert.equal(inflated.goal, goal, 'gzip 解压后内容与原 JSON 一致')
+
+  // identity 客户端：不压缩、原文可达（vary 仍在——响应随 accept-encoding 变化）
+  const identity = await rawRequest(`${url}api/team`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'accept-encoding': 'identity' },
+    body: JSON.stringify({ goal }),
+  })
+  assert.equal(identity.status, 200)
+  assert.equal(identity.headers['content-encoding'], undefined)
+  assert.equal((JSON.parse(identity.body.toString('utf8')) as { goal: string }).goal, goal)
+
+  // 小响应（<1KB 阈值）不压缩
+  const small = await rawRequest(`${url}api/health`, { headers: { 'accept-encoding': 'gzip' } })
+  assert.equal(small.status, 200)
+  assert.equal(small.headers['content-encoding'], undefined)
+
+  // 静态文本：app.js（数十 KB）接受 gzip 时压缩，解压后为前端源码
+  const appGz = await rawRequest(`${url}app.js`, { headers: { 'accept-encoding': 'gzip' } })
+  assert.equal(appGz.status, 200)
+  assert.equal(appGz.headers['content-encoding'], 'gzip')
+  assert.match(String(appGz.headers['content-type']), /^text\/javascript/)
+  assert.ok(gunzipSync(appGz.body).toString('utf8').includes('ROUTE_NAMES'))
+  const appPlain = await rawRequest(`${url}app.js`, { headers: { 'accept-encoding': 'identity' } })
+  assert.equal(appPlain.headers['content-encoding'], undefined)
+  assert.ok(appPlain.body.toString('utf8').includes('ROUTE_NAMES'))
 })

@@ -52,6 +52,18 @@ export interface Config {
   host?: '127.0.0.1' | '0.0.0.0'
   /** hosted 模式是否向官方 GUI 注入 OPC-OS 启动器（默认 true；standalone 下无意义） */
   launcher?: boolean
+  /**
+   * hosted 挂载鉴权（standalone 无官方 web 会话，不适用）：
+   * - 'inherit'（默认）：每个请求校验官方 DSH web 会话 cookie 的存在性——
+   *   cookie 名前缀 `dsh-auth-`（dsh-client-connection BrowserAuth 铸造，名为
+   *   `dsh-auth-` + base64url(sha256(host authority))），存在且值非空才放行，
+   *   否则 401（对齐官方 writeUnauthorized：no-store + text/plain）。
+   *   注意：存在性校验不等于验签——HMAC 校验需要宿主 credentials 里的会话密钥，
+   *   插件侧不可得；本校验只挡未登录浏览器的顺手访问，生产环境仍需反向代理
+   *   或网关完成真正的鉴权。
+   * - 'off'：不校验（已有反代/网关鉴权，或纯内网部署时使用）。
+   */
+  auth?: 'inherit' | 'off'
 }
 
 /** DSH webServer 路由（结构子集，见 @deepseek-ai/dsh-host-webserver 的 register 契约） */
@@ -85,6 +97,35 @@ const DEFAULT_PORT = 3000
 const DEFAULT_DATA_DIR = './opcos-console-data'
 const DEFAULT_HOST = '127.0.0.1'
 const HOSTED_BASE = 'http://opcos-console.hosted'
+/** 官方 web 会话 cookie 名前缀（dsh-client-connection BrowserAuth：`dsh-auth-` + base64url(sha256(authority))） */
+const AUTH_COOKIE_PREFIX = 'dsh-auth-'
+
+/**
+ * hosted 鉴权（auth='inherit'）：cookie 存在性校验——cookie 头中存在名字以
+ * `dsh-auth-` 开头且值非空的条目即放行。这不是验签（HMAC 校验需要宿主持有的
+ * 会话密钥，插件侧拿不到），生产仍需反代/网关（见 Config.auth 注释）。
+ */
+function hasDshAuthCookie(req: IncomingMessage): boolean {
+  const header = req.headers.cookie
+  if (typeof header !== 'string' || header.length === 0) return false
+  for (const segment of header.split(';')) {
+    const eq = segment.indexOf('=')
+    if (eq === -1) continue
+    if (segment.slice(0, eq).trim().startsWith(AUTH_COOKIE_PREFIX) && segment.slice(eq + 1).trim().length > 0) {
+      return true
+    }
+  }
+  return false
+}
+
+/** 401 响应（对齐官方 writeUnauthorized：no-store + text/plain，HEAD 无响应体） */
+function writeUnauthorized(req: IncomingMessage, res: ServerResponse): void {
+  res.writeHead(401, {
+    'cache-control': 'no-store',
+    'content-type': 'text/plain; charset=utf-8',
+  })
+  res.end(req.method === 'HEAD' ? undefined : 'dsh web authentication required; reopen the URL printed by dsh web.\n')
+}
 
 function isWebServer(value: unknown): value is DshWebServer {
   return typeof value === 'object' && value !== null && typeof (value as DshWebServer).register === 'function'
@@ -125,12 +166,17 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
   })
 }
 
-/** hosted：注册 /opcos prefix 路由（/opcos/api/* → API，其余剥前缀走静态）并挂注销 */
-function mountHosted(ctx: OpcContext, setup: ConsoleSetup, webServer: DshWebServer): void {
+/** hosted：注册 /opcos prefix 路由（/opcos/api/* → API，其余剥前缀走静态）并挂注销；
+ * auth='inherit'（默认）时每个请求先做 dsh-auth-* cookie 存在性校验（'off' 跳过） */
+function mountHosted(ctx: OpcContext, setup: ConsoleSetup, webServer: DshWebServer, auth: 'inherit' | 'off'): void {
   const route: DshWebServerRoute = {
     kind: 'prefix',
     path: PREFIX,
     handler: (req, res) => {
+      if (auth !== 'off' && !hasDshAuthCookie(req)) {
+        writeUnauthorized(req, res)
+        return
+      }
       const pathname = new URL(req.url ?? '/', HOSTED_BASE).pathname
       if (pathname === `${PREFIX}/api` || pathname.startsWith(`${PREFIX}/api/`)) {
         return handleApiRequest(req, res, setup, PREFIX)
@@ -190,12 +236,28 @@ const LAUNCHER_STYLE_TEXT = [
   'border-radius:8px;background:#1e293b;color:#e2e8f0;font:600 15px/1 system-ui,sans-serif;cursor:pointer;',
   'transition:background .15s ease;}',
   '.opc-launcher-close:hover{background:#334155;}',
+  /* 浅色宿主（.opc-light 由脚本按宿主主题标记切换）：按钮/遮罩/关闭按钮浅色变体 */
+  '.opc-launcher-btn.opc-light{background:#eef1f8;color:#1c2333;box-shadow:0 6px 20px rgba(28,35,51,.22);}',
+  '.opc-launcher-btn.opc-light:hover{box-shadow:0 10px 28px rgba(28,35,51,.3);}',
+  '.opc-launcher-overlay.opc-light{background:rgba(28,35,51,.45);}',
+  '.opc-launcher-overlay.opc-light .opc-launcher-frame{background:#f5f7fb;}',
+  '.opc-launcher-overlay.opc-light .opc-launcher-close{background:#e2e7f2;color:#1c2333;}',
+  '.opc-launcher-overlay.opc-light .opc-launcher-close:hover{background:#cfd6e8;}',
 ].join('')
 
 /**
  * 构造启动器注入行（纯函数，便于单测）：style + body 内联 script 两行。
  *
  * - 脚本幂等：经 getElementById(id) 检测，重复注入不重复创建按钮/遮罩；
+ * - 深链：按钮创建时读官方页面 URL 的 ?opcos-panel=<name>（缺省 overview），
+ *   打开遮罩时 iframe src = basePath + '/?panel=' + encodeURIComponent(panel)，
+ *   控制台前端（app.js）读自己的 ?panel= 初始路由到对应面板；
+ * - 主题联动（best-effort）：检测宿主 html/body 的官方深浅色标记
+ *   （body[data-ds-dark-theme] 与 html style.colorScheme，见 dsh-client-ui-theme
+ *   bootThemeScript），其余宿主按 class/data-theme 的 light/dark 词匹配，
+ *   找不到浅色标记保持深色默认；命中浅色给按钮与遮罩加 'opc-light' 类
+ *   （style 行含浅色变体）；
+ * - a11y：打开遮罩焦点移入关闭按钮、Esc 关闭、关闭后焦点还原启动器按钮；
  * - 遮罩含全屏 iframe（懒创建：首次点击才建，平时不发起任何对 /opcos 的请求）；
  * - 内联文本不含闭合标签序列（basePath 剔除 '<'，JSON.stringify 转义引号）。
  */
@@ -207,8 +269,35 @@ export function buildLauncherInjections(options?: LauncherInjectionOptions): Inj
   var CONSOLE_URL = ${JSON.stringify(consoleUrl)};
   var BTN_ID = ${JSON.stringify(LAUNCHER_BTN_ID)};
   var OVERLAY_ID = ${JSON.stringify(LAUNCHER_OVERLAY_ID)};
+  /* 深链：官方 GUI 页面 URL 的 ?opcos-panel=<name>（无参数默认 overview） */
+  var PANEL = 'overview';
+  try {
+    var requested = new URLSearchParams(location.search).get('opcos-panel');
+    if (typeof requested === 'string' && requested.length > 0) PANEL = requested;
+  } catch (error) { /* 无 URLSearchParams 的环境：保持默认面板 */ }
   function isOpen(overlay) {
     return !!(overlay && overlay.classList.contains('opc-launcher-open'));
+  }
+  function hostPrefersLight() {
+    var root = document.documentElement;
+    var body = document.body;
+    if (body && body.hasAttribute('data-ds-dark-theme')) return false; /* 官方深色标记 */
+    var scheme = (root && root.style && root.style.colorScheme) || '';
+    if (!scheme && root && typeof getComputedStyle === 'function') {
+      try { scheme = getComputedStyle(root).colorScheme || ''; } catch (error) { /* 忽略 */ }
+    }
+    if (scheme === 'light') return true; /* 官方 boot 脚本写 html style.colorScheme */
+    if (scheme === 'dark') return false;
+    var marker = ' ';
+    if (root) marker += (root.getAttribute('data-theme') || '') + ' ' + String(root.className || '') + ' ';
+    if (body) marker += (body.getAttribute('data-theme') || '') + ' ' + String(body.className || '') + ' ';
+    marker = marker.toLowerCase().replace(/[^a-z0-9_-]+/g, ' ');
+    if (marker.indexOf(' light ') !== -1 || marker.indexOf('light-theme') !== -1 || marker.indexOf('theme-light') !== -1) return true;
+    if (marker.indexOf(' dark ') !== -1 || marker.indexOf('dark-theme') !== -1 || marker.indexOf('theme-dark') !== -1) return false;
+    return false; /* 找不到浅色标记：保持深色默认 */
+  }
+  function applyHostTheme(el) {
+    if (el) el.classList.toggle('opc-light', hostPrefersLight());
   }
   function ensureOverlay() {
     var overlay = document.getElementById(OVERLAY_ID);
@@ -221,7 +310,7 @@ export function buildLauncherInjections(options?: LauncherInjectionOptions): Inj
     overlay.setAttribute('aria-label', 'OPC-OS console');
     var frame = document.createElement('iframe');
     frame.className = 'opc-launcher-frame';
-    frame.src = CONSOLE_URL;
+    frame.src = CONSOLE_URL + '?panel=' + encodeURIComponent(PANEL);
     frame.setAttribute('title', 'OPC-OS console');
     overlay.appendChild(frame);
     var close = document.createElement('button');
@@ -231,14 +320,31 @@ export function buildLauncherInjections(options?: LauncherInjectionOptions): Inj
     close.setAttribute('aria-label', 'Close OPC-OS console');
     close.addEventListener('click', function () { setOpen(false); });
     overlay.appendChild(close);
+    /* Esc 关闭（打开时焦点已移入遮罩内，keydown 可达） */
+    overlay.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') setOpen(false);
+    });
     document.body.appendChild(overlay);
     return overlay;
   }
   function setOpen(open) {
     var overlay = open ? ensureOverlay() : document.getElementById(OVERLAY_ID);
-    if (overlay) overlay.classList.toggle('opc-launcher-open', open);
+    if (overlay) {
+      overlay.classList.toggle('opc-launcher-open', open);
+      applyHostTheme(overlay);
+    }
     var btn = document.getElementById(BTN_ID);
-    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      applyHostTheme(btn);
+    }
+    /* a11y：打开遮罩焦点移入关闭按钮；关闭后焦点还原启动器按钮 */
+    if (open) {
+      var close = overlay ? overlay.querySelector('.opc-launcher-close') : null;
+      if (close) close.focus();
+    } else if (overlay && btn) {
+      btn.focus();
+    }
   }
   function mountButton() {
     if (document.getElementById(BTN_ID)) return; /* 幂等：id 检测，重复注入不重复创建 */
@@ -250,6 +356,7 @@ export function buildLauncherInjections(options?: LauncherInjectionOptions): Inj
     btn.setAttribute('aria-haspopup', 'dialog');
     btn.setAttribute('aria-expanded', 'false');
     btn.addEventListener('click', function () { setOpen(!isOpen(document.getElementById(OVERLAY_ID))); });
+    applyHostTheme(btn);
     document.body.appendChild(btn);
   }
   if (document.readyState === 'loading') {
@@ -351,9 +458,10 @@ export function apply(ctx: OpcContext, config: Config): void {
   }
 
   // 模式裁决：hosted 优先探测，webServer 缺席时按显式/自动分派
+  const auth = config.auth ?? 'inherit'
   const webServer = mode === 'standalone' ? undefined : ctx.getService('webServer')
   if (isWebServer(webServer)) {
-    mountHosted(ctx, setup, webServer)
+    mountHosted(ctx, setup, webServer, auth)
     if (config.launcher !== false) mountLauncherInjection(ctx) // 官方 GUI 每页注入启动器
     status = { mode: 'hosted' }
     readyResolve({ mode: 'hosted' })
@@ -384,7 +492,7 @@ export function apply(ctx: OpcContext, config: Config): void {
 /** 默认插件：standalone 优先（mode='auto' 探测 webServer，缺席回退自建 node:http） */
 export const plugin = defineOpcPlugin<Config>({
   name,
-  defaultConfig: { mode: 'auto', port: DEFAULT_PORT, launcher: true },
+  defaultConfig: { mode: 'auto', port: DEFAULT_PORT, launcher: true, auth: 'inherit' },
   apply,
 })
 
@@ -392,7 +500,7 @@ export const plugin = defineOpcPlugin<Config>({
 export const hostedPlugin = defineOpcPlugin<Config>({
   name: 'opc-console-hosted',
   inject: ['webServer'],
-  defaultConfig: { mode: 'hosted', port: DEFAULT_PORT, launcher: true },
+  defaultConfig: { mode: 'hosted', port: DEFAULT_PORT, launcher: true, auth: 'inherit' },
   apply: (ctx, config) => apply(ctx, { ...config, mode: 'hosted' }),
 })
 

@@ -3,11 +3,12 @@
  *
  * 启动链路（零外部运行时依赖，仅 node:http / node:sqlite / cordis）：
  * 1. 数据目录（默认 ./opcos-console-data，mkdir 0700，隔离清单与启动 marker 全部落在其中）；
- * 2. 真实 cordis 4.x `new Context()`，经 loadWithHandshake 守护装载六个 opc-* 插件
+ * 2. 真实 cordis 4.x `new Context()`，经 loadWithHandshake 守护装载七个 opc-* 插件
  *    （失败插件进隔离清单不阻断宿主，AR-R02）；
  * 3. createMarketCatalog（api.ts）：SqliteSkillIndex 市场索引；库空时预置 3 条示例
  *    MarketSkill，并用 createPackage 生成对应签名的 .dshpkg 存内存 pkgStore；
  * 4. subscribeTelemetry（api.ts）：订阅三个 TelemetryBus，收集环形数组；
+ *    content_publish 事件由 createApiSetup 阶段订阅 'opc.content.events' 进独立环形数组；
  * 5. node:http 服务器（请求处理层在 ./api.ts）：/ 与 /app.js、/style.css 等静态资源
  *    自 ../static/ 读取，/api/* 提供 REST 契约，统一把 OpcError 映射为
  *    {error:{code,message}} + 4xx/500。
@@ -30,6 +31,7 @@ import {
 } from '../../opcos-bundle/src/health.js'
 import { plugin as billingPlugin } from '../../dsh-plugins/opc-billing/src/index.js'
 import { plugin as blackboardPlugin } from '../../dsh-plugins/opc-blackboard/src/index.js'
+import { plugin as contentPlugin } from '../../dsh-plugins/opc-content/src/index.js'
 import { plugin as marketplacePlugin } from '../../dsh-plugins/opc-marketplace/src/index.js'
 import { plugin as memoryPlugin } from '../../dsh-plugins/opc-memory/src/index.js'
 import { plugin as skillForgePlugin } from '../../dsh-plugins/opc-skill-forge/src/index.js'
@@ -53,6 +55,8 @@ export interface ConsoleOptions {
   dataDir?: string
   /** 市场索引 SQLite 路径（默认 dataDir/skills.db） */
   skillsDbPath?: string
+  /** 测试/内省钩子：启动完成后以宿主 getService 暴露服务表（生产不传） */
+  onReady?: (getService: (name: string) => unknown) => void
 }
 
 export interface RunningConsole {
@@ -86,7 +90,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const dataDir = resolve(opts.dataDir ?? DEFAULT_DATA_DIR)
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 
-  // 2. 真实 cordis 宿主 + 六插件健康握手装载（失败插件隔离，不阻断宿主）
+  // 2. 真实 cordis 宿主 + 七插件健康握手装载（失败插件隔离，不阻断宿主）
   const ctx = await createCordisHost()
   const entries: HandshakeEntry[] = [
     { plugin: teamPlugin },
@@ -98,6 +102,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     { plugin: skillForgePlugin },
     { plugin: billingPlugin, config: { resolvedUnitPrice: 2.5, logFile: join(dataDir, 'billing.jsonl') } },
     { plugin: marketplacePlugin },
+    { plugin: contentPlugin },
   ]
   const quarantineFile = join(dataDir, 'opcos-quarantine.json')
   const markerFile = join(dataDir, 'opcos-boot-marker.json')
@@ -107,9 +112,11 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const skillsDbPath = resolve(opts.skillsDbPath ?? join(dataDir, 'skills.db'))
   const { index, pkgStore, publicKeyPem } = createMarketCatalog(skillsDbPath)
 
-  // 4. 埋点：订阅三个 TelemetryBus（team / blackboard / skillforge），收集环形数组
+  // 4. 埋点：订阅三个 TelemetryBus（team / blackboard / skillforge），收集环形数组；
+  //    content_publish 环形数组由 createApiSetup 阶段订阅 'opc.content.events' 维护
   const recentTelemetry: TelemetryEvent[] = []
   const telemetryUnsubs = subscribeTelemetry((name) => ctx.get(name), recentTelemetry)
+  const recentContentEvents: TelemetryEvent[] = []
 
   const deps: ConsoleDeps = {
     getService: (name) => ctx.get(name),
@@ -120,6 +127,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     billingLogFile: join(dataDir, 'billing.jsonl'),
     quarantineFile,
     telemetry: recentTelemetry,
+    contentEvents: recentContentEvents,
     handshake,
   }
   const setup = createApiSetup(deps)
@@ -135,6 +143,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     closed = true
     for (const off of telemetryUnsubs) off()
     telemetryUnsubs.length = 0
+    setup.disposeContentEvents()
     await new Promise<void>((resolveClose) => {
       server.close(() => resolveClose())
       server.closeAllConnections()
@@ -170,6 +179,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   }
   const displayHost = address.family === 'IPv6' ? `[${address.address}]` : address.address
   const url = `http://${displayHost}:${address.port}/`
+  opts.onReady?.((name) => ctx.get(name))
 
   return { url, close: shutdown }
 }

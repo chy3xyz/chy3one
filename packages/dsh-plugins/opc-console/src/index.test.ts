@@ -5,9 +5,12 @@
  *   auto 模式同环境回退 standalone；
  * - mock ctx + hosted + fake webServer：捕获 {kind:'prefix', path:'/opcos'} 路由，
  *   /opcos/api/* → API（JSON + OpcError 映射），/opcos/ → 静态 HTML；unload 注销路由；
+ * - hosted 鉴权（auth 默认 'inherit'）：无/空值/非 dsh-auth cookie → 401（no-store +
+ *   text/plain），带 dsh-auth-* 非空 cookie → API 与静态放行；auth:'off' 不校验；
  * - 启动器注入：buildLauncherInjections 行结构（style/script、类名前缀、幂等、无闭合
- *   标签）；hosted emit `webserver/index-inject` 时 push 两行，launcher:false 不注入，
- *   卸载后退订生效（mock dispatch 与真实 cordis emit 双路径）；
+ *   标签）+ 深链（opcos-panel → ?panel=）+ 主题联动（data-ds-dark-theme/opc-light）+
+ *   a11y（Esc/focus 还原）；hosted emit `webserver/index-inject` 时 push 两行，
+ *   launcher:false 不注入，卸载后退订生效（mock dispatch 与真实 cordis emit 双路径）；
  * - 真实 cordis 4.x：provide 前置与响应式等待（hostedPlugin inject）两种装载路径，
  *   fiber.dispose() 后注销函数被调。
  */
@@ -222,15 +225,21 @@ test('hosted：捕获 /opcos prefix 路由；api → JSON，静态 → HTML；un
   assert.equal(route.kind, 'prefix')
   assert.equal(route.path, '/opcos')
 
-  // /opcos/api/health → 剥前缀进 API 层，JSON + ok
+  // /opcos/api/health → 剥前缀进 API 层，JSON + ok（auth='inherit' 需带 dsh-auth-* cookie）
   const jsonRes = createResStub()
-  await route.handler({ url: '/opcos/api/health', headers: {} } as IncomingMessage, jsonRes)
+  await route.handler(
+    { url: '/opcos/api/health', headers: { cookie: 'dsh-auth-x=v1.abc.def' } } as IncomingMessage,
+    jsonRes,
+  )
   assert.match(jsonRes.body, /"ok":true/)
   assert.match(String(jsonRes.headers['content-type']), /^application\/json/)
 
   // /opcos/ → 剥前缀得 / → index.html/占位页
   const htmlRes = createResStub()
-  await route.handler({ url: '/opcos/', headers: {} } as IncomingMessage, htmlRes)
+  await route.handler(
+    { url: '/opcos/', headers: { cookie: 'dsh-auth-x=v1.abc.def' } } as IncomingMessage,
+    htmlRes,
+  )
   assert.match(String(htmlRes.headers['content-type']), /^text\/html/)
   assert.equal(htmlRes.status, 200)
 
@@ -254,6 +263,7 @@ test('buildLauncherInjections：style+script 两行；类名前缀 / 按钮 id /
   assert.match(style.text, /z-index:\s*2147483000/, 'z-index 高于官方 UI')
   assert.match(style.text, /\.opc-launcher-overlay/, '含全屏遮罩样式')
   assert.match(style.text, /\.opc-launcher-close/, '含关闭按钮样式')
+  assert.match(style.text, /\.opc-light/, '含浅色宿主主题变体（.opc-light）')
   assert.ok(!style.text.includes('</style'), 'style.text 不得含闭合标签序列')
 
   // script：按钮/遮罩 id、默认 basePath、幂等（id 检测）、按钮文案、无闭合序列
@@ -264,6 +274,19 @@ test('buildLauncherInjections：style+script 两行；类名前缀 / 按钮 id /
   assert.ok(script.text.includes('⚡ OPC-OS'), '按钮文案')
   assert.ok(script.text.includes("createElement('iframe')"), 'iframe 经 DOM API 创建（脚本不拼 raw html、不发起外部请求）')
   assert.ok(!script.text.includes('</script'), 'script.text 不得含闭合序列')
+
+  // 深链：读官方页面 ?opcos-panel=，打开遮罩时 iframe src 携带 ?panel=<encodeURIComponent>
+  assert.ok(script.text.includes("'opcos-panel'"), '读取官方页面 URL 的 opcos-panel 参数')
+  assert.ok(script.text.includes("var PANEL = 'overview'"), '无参数默认 overview 面板')
+  assert.ok(script.text.includes("CONSOLE_URL + '?panel=' + encodeURIComponent(PANEL)"), 'iframe src = basePath/?panel=<encoded>')
+  // 主题联动：官方深色标记 / 浅色命中加 opc-light 类（找不到标记保持深色默认）
+  assert.ok(script.text.includes('data-ds-dark-theme'), 'best-effort 读取官方 body[data-ds-dark-theme] 深色标记')
+  assert.ok(script.text.includes("getComputedStyle(root).colorScheme"), '回退读 html colorScheme（官方 boot 脚本内联写入）')
+  assert.ok(script.text.includes("classList.toggle('opc-light'"), '命中浅色给按钮/遮罩加 opc-light 类')
+  // a11y：打开遮罩焦点移入关闭按钮、Esc 关闭、关闭后焦点还原启动器按钮
+  assert.ok(script.text.includes('Escape'), 'Esc 关闭遮罩')
+  assert.ok(script.text.includes('close.focus()'), '打开遮罩焦点移入关闭按钮')
+  assert.ok(script.text.includes('btn.focus()'), '关闭后焦点还原启动器按钮')
 
   // 自定义 basePath：去尾斜杠后拼 '/xx/'，不再出现默认路径
   const custom = buildLauncherInjections({ basePath: '/custom-console///' })
@@ -306,6 +329,65 @@ test('hosted 注入（mock）：emit webserver/index-inject push style+script；
   const tableOff: unknown[] = []
   ctxOff.dispatch('webserver/index-inject', tableOff)
   assert.equal(tableOff.length, 0, 'launcher:false 时 emit 后数组应为空')
+  ctxOff.unload()
+})
+
+/* ─────────────── hosted 鉴权（auth: 'inherit' 默认 cookie 存在性校验） ─────────────── */
+
+test('hosted 鉴权：无/空值/非 dsh-auth cookie → 401；带 dsh-auth-* → 放行；auth:off 不校验', async (t) => {
+  const dataDir = tmpDataDir(t)
+  const fake = createFakeWebServer()
+  const ctx = createMockContext()
+  installOpcServices(ctx)
+  ctx.provideService('webServer', fake.service)
+  apply(ctx, { mode: 'hosted', dataDir })
+
+  const route = fake.routes[0] as CapturedRoute
+  const cookie = { cookie: 'other=1; dsh-auth-x=v1.abc.def' }
+
+  // 无 cookie → 401（对齐官方 writeUnauthorized：no-store + text/plain）
+  const denied = createResStub()
+  await route.handler({ url: '/opcos/api/health', headers: {} } as IncomingMessage, denied)
+  assert.equal(denied.status, 401)
+  assert.match(String(denied.headers['content-type']), /^text\/plain/)
+  assert.equal(denied.headers['cache-control'], 'no-store')
+  assert.match(denied.body, /authentication required/)
+
+  // 静态路径同样被拦（存在性校验在 API/静态分派之前）
+  const deniedStatic = createResStub()
+  await route.handler({ url: '/opcos/', headers: {} } as IncomingMessage, deniedStatic)
+  assert.equal(deniedStatic.status, 401)
+
+  // 空值 dsh-auth-x= → 401；仅非 dsh-auth 前缀 cookie → 401
+  const emptyValue = createResStub()
+  await route.handler({ url: '/opcos/api/health', headers: { cookie: 'dsh-auth-x=' } } as IncomingMessage, emptyValue)
+  assert.equal(emptyValue.status, 401)
+  const foreign = createResStub()
+  await route.handler({ url: '/opcos/api/health', headers: { cookie: 'session=abc' } } as IncomingMessage, foreign)
+  assert.equal(foreign.status, 401)
+
+  // 带 dsh-auth-* 非空 cookie → API 与静态均放行
+  const okApi = createResStub()
+  await route.handler({ url: '/opcos/api/health', headers: cookie } as IncomingMessage, okApi)
+  assert.equal(okApi.status, 200)
+  assert.match(okApi.body, /"ok":true/)
+  const okStatic = createResStub()
+  await route.handler({ url: '/opcos/', headers: cookie } as IncomingMessage, okStatic)
+  assert.equal(okStatic.status, 200)
+
+  ctx.unload()
+
+  // auth: 'off'：不校验 cookie（反代/网关已做真鉴权的部署形态）
+  const fakeOff = createFakeWebServer()
+  const ctxOff = createMockContext()
+  installOpcServices(ctxOff)
+  ctxOff.provideService('webServer', fakeOff.service)
+  apply(ctxOff, { mode: 'hosted', dataDir, auth: 'off' })
+  const routeOff = fakeOff.routes[0] as CapturedRoute
+  const bypassed = createResStub()
+  await routeOff.handler({ url: '/opcos/api/health', headers: {} } as IncomingMessage, bypassed)
+  assert.equal(bypassed.status, 200, 'auth:off 时无 cookie 也放行')
+  assert.match(bypassed.body, /"ok":true/)
   ctxOff.unload()
 })
 
