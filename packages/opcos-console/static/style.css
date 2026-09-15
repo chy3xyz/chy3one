@@ -482,6 +482,29 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
 
 .memory-content { margin: 10px 0 8px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
 
+/* ---------------- 创作者卡片 ---------------- */
+
+.creator-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+
+.creator-card {
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.creator-card:hover { border-color: var(--primary); }
+
+.creator-card:focus-visible { outline-offset: 0; }
+
+.creator-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.creator-card .role-name { margin-top: 0; word-break: break-all; }
+
+.creator-card .big-number { margin-top: 8px; font-size: 30px; }
+
 /* ---------------- 空态 / 错误 ---------------- */
 
 .empty {

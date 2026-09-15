@@ -75,7 +75,7 @@ export interface StrategyOverrides {
   publishAdapter?: PublishAdapter
 }
 
-/** 草稿 → 平台适配产物：正文分段包 <p>，标签取标题/角度截断 + 平台名 */
+/** 草稿 → 平台适配产物：正文分段包 <p>，标签取 LLM 自拟（可选）+ 标题/角度截断 + 平台名 */
 export function toPlatformContent(draft: Draft, brief: Brief): PlatformContent {
   const htmlBody = draft.body
     .split('\n')
@@ -83,7 +83,7 @@ export function toPlatformContent(draft: Draft, brief: Brief): PlatformContent {
     .filter((p) => p.length > 0)
     .map((p) => `<p>${p}</p>`)
     .join('')
-  const tags = [...new Set([draft.platform, brief.title.slice(0, 8), brief.angle.slice(0, 8)])]
+  const tags = [...new Set([draft.platform, ...(draft.tags ?? []), brief.title.slice(0, 8), brief.angle.slice(0, 8)])]
   return { platform: draft.platform, title: draft.title, htmlBody, tags }
 }
 

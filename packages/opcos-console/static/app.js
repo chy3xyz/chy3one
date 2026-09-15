@@ -151,7 +151,7 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'team', 'blackboard', 'skills', 'orders', 'billing', 'memory'];
+  const ROUTE_NAMES = ['overview', 'team', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'memory'];
   const router = {
     current() {
       const m = /^#\/([a-z]+)/.exec(location.hash);
@@ -458,7 +458,7 @@
       return ui.table(['订单 ID', 'Skill', '买家', '金额', '状态', '创建时间', '操作'],
         (((data || {}).orders) || []).map(o => [
           h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.buyerId || '—',
-          o.amountCents != null ? money(o.amountCents) : '—', statusBadge(o.status),
+          o.amount != null ? money(o.amount) : '—', statusBadge(o.status),
           o.createdAt ? fmtTime(o.createdAt) : '—',
           isUnpaid(o.status) ? payButton(o) : '—',
         ]));
@@ -491,6 +491,105 @@
         ui.toolbar(ui.grow(ui.field('按买家过滤', listBuyerInput)), ui.actions(refreshBtn)),
         listBox));
     await Promise.all([loadSkillOptions(), loadOrders()]);
+  };
+
+  /* ===== 面板：创作者中心（SF-07） ===== */
+  ROUTES.creators = async box => {
+    const listBox = h('div'),
+      detailTitle = h('h3', { class: 'card-title', text: '分成流水' }),
+      detailBox = h('div');
+    /** 点击创作者卡片 → 展开该作者的分成流水表（高亮当前卡片） */
+    const loadDetail = authorId => {
+      $$('.creator-card', listBox).forEach(c => c.classList.toggle('active', c.dataset.author === authorId));
+      detailTitle.textContent = `分成流水 · ${authorId}`;
+      loadInto(detailBox, null, async () => {
+        const data = await api.get(`/api/creators/${encodeURIComponent(authorId)}`);
+        const entries = (data && data.entries) || [];
+        if (!entries.length) return ui.empty('该创作者暂无分成流水');
+        return [
+          h('div', { class: 'big-number', style: 'margin:2px 0 4px', text: money(data && data.balance) }),
+          h('div', { class: 'stat-label', style: 'margin-bottom:12px', text: '累计未提取余额（85% 分成，单位：分）' }),
+          ui.table(['订单 ID', '订单金额', '创作者分成', '平台分成', '入账时间'],
+            entries.map(e => [
+              h('code', { class: 'key-code', text: e.orderId }), money(e.amount),
+              h('span', { class: 'ok-text', text: money(e.creator) }), money(e.platform), fmtTime(e.recordedAt),
+            ])),
+        ];
+      }, '分成流水加载失败');
+    };
+    const loadCreators = () => loadInto(listBox, null, async () => {
+      const creators = (((await api.get('/api/creators')) || {}).creators) || [];
+      if (!creators.length) return ui.empty('暂无创作者分成：在「订单交易」完成一笔支付后即按 85/15 入账');
+      return h('div', { class: 'card-grid creator-grid' }, creators.map(c => {
+        const card = h('div', { class: 'card creator-card', role: 'button', tabindex: '0', 'data-author': c.authorId },
+          h('div', { class: 'role-name', text: c.authorId }),
+          h('div', { class: 'big-number', text: money(c.balance) }),
+          h('div', { class: 'stat-label', text: '累计未提取余额（分）' }),
+          h('div', { class: 'stat-sub', text: `分成 ${num(c.splits)} 笔 · 最近入账 ${fmtTime(c.lastAt)}` }));
+        const open = () => loadDetail(c.authorId);
+        card.addEventListener('click', open);
+        card.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+        return card;
+      }));
+    }, '创作者列表加载失败');
+    render(box,
+      ui.pageTitle('创作者中心', 'SF-07 收益统计：创作者余额与分成流水（85% 创作者 / 15% 平台，金额单位：分）'),
+      listBox,
+      ui.sectionCard(null, detailTitle, detailBox));
+    await loadCreators();
+  };
+
+  /* ===== 面板：客户账单（DE-08） ===== */
+  ROUTES.bills = async box => {
+    const summaryBox = h('div'),
+      buyerSelect = h('select', { class: 'input' }, h('option', { value: '', text: '从已成交买家中选择…' })),
+      buyerInput = h('input', { class: 'input', placeholder: '或输入任意买家 ID 查询' }),
+      queryBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '查询账单' }),
+      listBox = h('div');
+    const loadSummary = () => loadInto(summaryBox, null, async () => {
+      const s = await api.get('/api/bills/summary');
+      render(buyerSelect, h('option', { value: '', text: '从已成交买家中选择…' }),
+        ...((s && s.buyers) || []).map(b => h('option', { value: b.buyerId, text: `${b.buyerId}（${money(b.spent)}）` })));
+      if (!s || (!s.totalBuyers && !s.totalOrders)) return ui.empty('暂无交易数据：完成一笔 Skill 订单支付后即出账单');
+      return h('div', { class: 'card-grid' }, [
+        ui.statCard('总买家数（已成交）', num(s.totalBuyers)),
+        ui.statCard('总订单 · 支付成功口径', `${num(s.totalOrders)} 笔`, '含其后退款（stats.totalPaid）'),
+        ui.statCard('订单净额 · paid+delivered', money(s.orderNetAmountCents), `${num(s.orderNetCount)} 笔 · 单位：分`),
+        ui.statCard('RaaS 计费收入', yuan(s.raasRevenueYuan), '单位：元'),
+        ui.statCard('总收入（订单净额 + RaaS）', yuan(s.totalRevenueYuan), '单位：元'),
+      ]);
+    }, '账单汇总加载失败');
+    const loadBills = () => loadInto(listBox, null, async () => {
+      const buyerId = buyerInput.value.trim() || buyerSelect.value;
+      if (!buyerId) return ui.empty('请先在上方选择或输入买家 ID');
+      const data = await api.get(`/api/bills?buyerId=${encodeURIComponent(buyerId)}`);
+      const orders = (data && data.orders) || [];
+      if (!orders.length) return ui.empty(`买家 ${data && data.buyerId} 暂无订单`);
+      return [
+        h('p', { class: 'result-line' },
+          `买家 ${data.buyerId} · 共 ${orders.length} 笔订单 · 总消费 `,
+          h('strong', { class: 'ok-text', text: money(data.totalSpent) })),
+        h('p', { class: 'muted small', style: 'margin:4px 0 10px', text: '总消费口径：paid + delivered 订单金额合计（pending / refunded / cancelled 不计入），单位：分' }),
+        ui.table(['订单 ID', 'Skill', '版本', '金额', '状态', '下单时间'],
+          orders.map(o => [
+            h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.version || '—',
+            money(o.amount), statusBadge(o.status), fmtTime(o.createdAt),
+          ])),
+      ];
+    }, '账单加载失败');
+    buyerSelect.addEventListener('change', () => {
+      if (buyerSelect.value) { buyerInput.value = buyerSelect.value; loadBills(); }
+    });
+    busyBtn(queryBtn, '查询中…', loadBills);
+    onEnter(buyerInput, loadBills);
+    render(box,
+      ui.pageTitle('客户账单', 'DE-08 客户账单：买家订单明细与总消费，顶部汇总市场净额与 RaaS 收入'),
+      summaryBox,
+      ui.sectionCard('按买家查询',
+        ui.toolbar(ui.grow(ui.field('已成交买家', buyerSelect)), ui.grow(ui.field('买家 ID', buyerInput)),
+          ui.actions(queryBtn))),
+      listBox);
+    await loadSummary();
   };
 
   /* ===== 面板：RaaS 计费 ===== */

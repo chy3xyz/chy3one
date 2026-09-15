@@ -71,6 +71,14 @@ type BillingComplete = (event: {
   resolution: 'resolved' | 'escalated'
 }) => BillingRecord
 
+/** 分成 ledger 服务（opc.marketplace.revenue：RevenueSplitter 的结构子集，SF-07） */
+interface RevenueLedger {
+  /** 创作者累计未提取余额（分） */
+  creatorBalance(authorId: string): number
+  /** 全量分成流水（只读快照） */
+  listEntries(): readonly SplitEntry[]
+}
+
 /* ─────────────── 预置示例技能（库空时灌入市场索引 + 签名包仓库） ─────────────── */
 
 interface SampleSkill {
@@ -549,6 +557,26 @@ function readBillingRecords(logFile: string): BillingRecord[] {
   return records
 }
 
+/** 路径段解码：空段或非法百分号编码 → VALIDATION_ERROR */
+function decodePathSegment(raw: string, field: string): string {
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(raw)
+    } catch {
+      throw new OpcError('VALIDATION_ERROR', `path parameter ${field} is not valid percent-encoding: ${raw}`)
+    }
+  })()
+  if (decoded.length === 0) {
+    throw new OpcError('VALIDATION_ERROR', `path parameter ${field} must be a non-empty string`)
+  }
+  return decoded
+}
+
+/** SF-07 聚合口径：paid+delivered 才计入净额（对齐 OrderEngine.stats().netRevenue 笔数口径） */
+function isNetPositive(status: Order['status']): boolean {
+  return status === 'paid' || status === 'delivered'
+}
+
 /* ─────────────── 路由 ─────────────── */
 
 const API_PATHS = new Set([
@@ -561,6 +589,9 @@ const API_PATHS = new Set([
   '/api/skillforge/drafts',
   '/api/orders',
   '/api/orders/pay',
+  '/api/creators',
+  '/api/bills',
+  '/api/bills/summary',
   '/api/billing/summary',
   '/api/billing/complete',
   '/api/memory',
@@ -701,6 +732,79 @@ async function dispatchApi(
       return
     }
 
+    case 'GET /api/creators': {
+      // SF-07 创作者中心：分成 ledger 全量流水按 authorId 聚合（金额单位：分）
+      const revenue = requireService<RevenueLedger>(setup, 'opc.marketplace.revenue')
+      const byAuthor = new Map<string, { balance: number; splits: number; lastAt: number }>()
+      for (const entry of revenue.listEntries()) {
+        const agg = byAuthor.get(entry.authorId) ?? { balance: 0, splits: 0, lastAt: 0 }
+        agg.balance += entry.creator
+        agg.splits += 1
+        agg.lastAt = Math.max(agg.lastAt, entry.recordedAt)
+        byAuthor.set(entry.authorId, agg)
+      }
+      const creators = [...byAuthor.entries()]
+        .map(([authorId, agg]) => ({ authorId, balance: agg.balance, splits: agg.splits, lastAt: agg.lastAt }))
+        .sort((a, b) => b.balance - a.balance || a.authorId.localeCompare(b.authorId))
+      sendJson(res, 200, { creators, unit: 'cents' })
+      return
+    }
+
+    case 'GET /api/bills': {
+      // DE-08 客户账单：买家维度订单 + 总消费（口径：paid+delivered 计入，pending/refunded/cancelled 不计；单位：分）
+      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      if (!buyerId) throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
+      const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
+      const list = orders.listByBuyer(buyerId).sort((a, b) => b.createdAt - a.createdAt)
+      const totalSpentCents = list.filter((o) => isNetPositive(o.status)).reduce((sum, o) => sum + o.amount, 0)
+      sendJson(res, 200, {
+        buyerId,
+        orders: list,
+        totalSpent: totalSpentCents,
+        totalSpentYuan: Math.round(totalSpentCents) / 100,
+        unit: 'cents',
+      })
+      return
+    }
+
+    case 'GET /api/bills/summary': {
+      // DE-08 汇总：买家/净额从分成 ledger join 订单状态推导（支付成功即入账，paid+delivered 计净额）；
+      // 口径标注：订单金额单位为"分"，RaaS 计费与总收入单位为"元"（BillingEngine.unitPrice 语义）
+      const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
+      const revenue = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
+      const billing = setup.getService('opc.billing') as BillingEngine | undefined
+      const stats = orders.stats()
+      const byBuyer = new Map<string, { orders: number; spent: number }>()
+      let orderNetAmountCents = 0
+      for (const entry of revenue ? revenue.listEntries() : []) {
+        const order = orders.get(entry.orderId)
+        if (!order || !isNetPositive(order.status)) continue
+        const agg = byBuyer.get(order.buyerId) ?? { orders: 0, spent: 0 }
+        agg.orders += 1
+        agg.spent += order.amount
+        byBuyer.set(order.buyerId, agg)
+        orderNetAmountCents += order.amount
+      }
+      const raasRevenueYuan = billing ? billing.totalRevenue() : 0
+      sendJson(res, 200, {
+        buyers: [...byBuyer.entries()]
+          .map(([buyerId, agg]) => ({ buyerId, orders: agg.orders, spent: agg.spent }))
+          .sort((a, b) => b.spent - a.spent || a.buyerId.localeCompare(b.buyerId)),
+        totalBuyers: byBuyer.size,
+        totalOrders: stats.totalPaid,
+        orderNetCount: stats.netRevenue,
+        orderNetAmountCents,
+        raasRevenueYuan,
+        totalRevenueYuan: Math.round((orderNetAmountCents / 100 + raasRevenueYuan) * 100) / 100,
+        units: {
+          orderAmounts: 'cents(分)',
+          raasAndTotalRevenue: 'yuan(元)',
+          notes: 'spent/orderNetAmountCents 为分；raasRevenueYuan/totalRevenueYuan 为元；totalOrders 为支付成功笔数（stats.totalPaid，含其后退款），orderNetCount 为 paid+delivered 笔数（stats.netRevenue）',
+        },
+      })
+      return
+    }
+
     case 'GET /api/billing/summary': {
       const engine = requireService<BillingEngine>(setup, 'opc.billing')
       sendJson(res, 200, {
@@ -768,16 +872,29 @@ async function dispatchApi(
       return
     }
 
-    default:
-      if (API_PATHS.has(path)) {
+    default: {
+      // 参数路由：GET /api/creators/:authorId → 该作者的累计余额与分成流水（时间倒序）
+      if (method === 'GET' && path.startsWith('/api/creators/')) {
+        const authorId = decodePathSegment(path.slice('/api/creators/'.length), 'authorId')
+        const revenue = requireService<RevenueLedger>(setup, 'opc.marketplace.revenue')
+        const entries = revenue
+          .listEntries()
+          .filter((e) => e.authorId === authorId)
+          .sort((a, b) => b.recordedAt - a.recordedAt)
+        sendJson(res, 200, { authorId, balance: revenue.creatorBalance(authorId), entries })
+        return
+      }
+      if (API_PATHS.has(path) || (method !== 'GET' && path.startsWith('/api/creators/'))) {
         throw new OpcError('METHOD_NOT_ALLOWED', `${method} ${path} is not supported`)
       }
       throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+    }
   }
 }
 
 /**
- * 12 个 REST 端点 + OpcError → {error:{code,message}} 映射（原 handleRequest 的 API 半区）。
+ * 20 个 REST 端点（含 SF-07 创作者中心 / DE-08 客户账单 4 条）+ OpcError → {error:{code,message}} 映射
+ * （原 handleRequest 的 API 半区）。
  * @param urlPrefix hosted 模式传挂载前缀（如 '/opcos'），从 pathname 剥离后再匹配 /api/*
  */
 export async function handleApiRequest(

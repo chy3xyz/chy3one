@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { OpcError } from '../errors.js'
 import type { MemoryEntry, MemoryStore } from '../memory/memory.js'
+import { hotSourceRef } from './web-topic.js'
 import type { Brief, Draft, PlatformContent, PublishResult, ReviewResult, ReviewViolation } from './types.js'
 
 /* ─────────────── CE-01 选题策略 ─────────────── */
@@ -17,8 +18,28 @@ export interface TopicStrategy {
   pick(memory: MemoryStore): Promise<Brief>
 }
 
+/**
+ * 热点话题源最小契约（CE-01 热点搜索）。core 零外部依赖：与 web-topic.ts 的
+ * WebSearchTopicSource 及 ctx.web 衍生实现鸭子类型兼容，不 import dsh-web。
+ */
+export interface HotTopicSource {
+  /** 返回热点标题列表；无结果/服务不可用时返回 []（优雅降级由实现方负责） */
+  hotTopics(keywords: string[]): Promise<string[]>
+}
+
+/** 候选来源标签：记忆直连 / 内置常青库 / 热点搜索 */
+export type CandidateSource = 'memory' | 'builtin' | 'hot'
+
+/** 带来源标签的选题候选（Brief 结构超集，既有消费方不受影响） */
+export interface TopicCandidate extends Brief {
+  source: CandidateSource
+}
+
 /** CE-01 验收：输出 ≥5 个候选选题 */
 export const MIN_TOPIC_CANDIDATES = 5
+
+/** 无 topic 记忆时的热点检索兜底关键词 */
+export const DEFAULT_HOT_KEYWORDS = ['AI 效率', '个人成长']
 
 /** 内置常青选题（mock「热点搜索」；热点无结果时按 PRD 6.3.4 回退至选题库） */
 const EVERGREEN_TOPICS: Array<{ title: string; angle: string }> = [
@@ -49,12 +70,18 @@ function overlaps(a: Set<string>, b: Set<string>): boolean {
 const round1 = (n: number) => Math.round(n * 10) / 10
 
 /**
- * 模板选题策略：候选 = 进行中选题（topic 记忆直连） + 常青选题库。
+ * 模板选题策略：候选 = 进行中选题（topic 记忆直连） + 常青选题库（+ 可选热点并入）。
  * 记忆直连候选天然携带人设相关性（≥4 分），保证 CE-01 验收线。
  */
 export class TemplateTopicStrategy implements TopicStrategy {
+  /**
+   * @param topicSource 可选热点话题源：注入后 pick() 把热点并入候选（source:'hot'，
+   * sources 标注 hot://）；检索失败时由 HotTopicSource 自身降级为 []，不阻塞选题
+   */
+  constructor(private readonly topicSource?: HotTopicSource) {}
+
   /** 生成全部候选（≥5，CE-01）；暴露给测试与上层观测 */
-  generateCandidates(memory: MemoryStore): Brief[] {
+  generateCandidates(memory: MemoryStore): TopicCandidate[] {
     const topics = memory.query({ category: 'topic', limit: 5 })
     const soul = memory.query({ category: 'soul', limit: 1 })
     const personaEntries: MemoryEntry[] = [
@@ -63,12 +90,13 @@ export class TemplateTopicStrategy implements TopicStrategy {
       ...memory.query({ category: 'rules', limit: 5 }),
     ]
 
-    const candidates: Brief[] = topics.map((t) => ({
+    const candidates: TopicCandidate[] = topics.map((t) => ({
       title: t.content,
       angle: `围绕进行中选题「${t.content}」做深度展开，结合账号人设给出可执行结论`,
       // 记忆直连选题：基线 4（CE-01 相关性 ≥4/5）+ 置信度加权
       personaScore: round1(Math.min(5, 4 + t.confidence)),
       sources: [`memory://topic/${t.id.slice(0, 8)}`],
+      source: 'memory',
     }))
 
     for (const e of EVERGREEN_TOPICS) {
@@ -77,20 +105,63 @@ export class TemplateTopicStrategy implements TopicStrategy {
         angle: e.angle,
         personaScore: this.scoreAgainstMemory(`${e.title} ${e.angle}`, personaEntries),
         sources: ['builtin://evergreen-topics'],
+        source: 'builtin',
       })
     }
     return candidates
   }
 
-  async pick(memory: MemoryStore): Promise<Brief> {
+  /** 含热点并入的完整候选集（异步版）：无 topicSource / 检索失败 → 与同步版等价（常青兜底） */
+  async generateCandidatesWithHot(memory: MemoryStore): Promise<TopicCandidate[]> {
     const candidates = this.generateCandidates(memory)
+    if (!this.topicSource) return candidates
+    try {
+      const keywords = this.hotKeywords(memory)
+      const hot = await this.topicSource.hotTopics(keywords)
+      const personaEntries = this.personaEntries(memory)
+      for (const title of hot) {
+        if (candidates.some((c) => c.title === title)) continue // 与记忆直连选题去重
+        candidates.push({
+          title,
+          angle: `借势热点「${title}」，结合账号人设给出竞品拆解与差异化落点`,
+          personaScore: this.scoreAgainstMemory(title, personaEntries),
+          sources: [hotSourceRef(title)],
+          source: 'hot',
+        })
+      }
+    } catch {
+      // 防御分支：HotTopicSource 约定不抛错；此处兜底保证选题永不被热点阻塞
+    }
+    return candidates
+  }
+
+  async pick(memory: MemoryStore): Promise<Brief> {
+    const candidates = this.topicSource
+      ? await this.generateCandidatesWithHot(memory)
+      : this.generateCandidates(memory)
     if (candidates.length < MIN_TOPIC_CANDIDATES) {
       // 防御分支：常青库兜底后仍不足，说明内置库被错误清空
       throw new OpcError('CE_TOPIC_EXHAUSTED', `候选选题不足 ${MIN_TOPIC_CANDIDATES} 个: ${candidates.length}`)
     }
-    // 稳定排序：同分时保持插入序（记忆直连候选优先于常青库）
+    // 稳定排序：同分时保持插入序（记忆直连候选优先于常青库/热点）
     candidates.sort((a, b) => b.personaScore - a.personaScore)
     return candidates[0]
+  }
+
+  /** 热点检索关键词：进行中选题（≤3）→ 人设 soul → 内置兜底词 */
+  private hotKeywords(memory: MemoryStore): string[] {
+    const topics = memory.query({ category: 'topic', limit: 3 }).map((t) => t.content)
+    if (topics.length > 0) return topics
+    const soul = memory.query({ category: 'soul', limit: 1 })[0]
+    return soul ? [soul.content] : [...DEFAULT_HOT_KEYWORDS]
+  }
+
+  private personaEntries(memory: MemoryStore): MemoryEntry[] {
+    return [
+      ...memory.query({ category: 'soul', limit: 1 }),
+      ...memory.query({ category: 'fact', limit: 5 }),
+      ...memory.query({ category: 'rules', limit: 5 }),
+    ]
   }
 
   /** 常青候选与人设记忆的 bigram 命中数计分：无记忆 3.0 起，每命中一条 +0.5，封顶 5 */

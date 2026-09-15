@@ -10,8 +10,13 @@ export interface Brief {
   angle: string
   /** 人设相关性评分 0..5（CE-01 验收：≥ 4/5） */
   personaScore: number
-  /** 选题依据来源（memory://、builtin:// 等可追溯标识） */
+  /** 选题依据来源（memory://、builtin://、hot:// 等可追溯标识） */
   sources: string[]
+  /**
+   * 差异化定位维度（CE-02 LLM 分析策略产出，可选：模板策略不产生）。
+   * 每条为「维度：本文差异 vs 市场常见做法」的竞品拆解对比。
+   */
+  differentiation?: string[]
 }
 
 /** CE-03 撰写产物：平台初稿（MVP 仅公众号长文） */
@@ -19,6 +24,8 @@ export interface Draft {
   title: string
   body: string
   platform: 'wechat'
+  /** LLM 撰写策略自拟标签（可选：模板策略不产生；分发适配时并入 PlatformContent.tags） */
+  tags?: string[]
 }
 
 /** 审核违规条目（CE-04：检出违规需标记具体违规点，驱动重写） */
