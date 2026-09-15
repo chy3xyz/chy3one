@@ -66,3 +66,8 @@
       config:
         mode: auto
         port: 3000
+
+    # Content Engine MVP：选题→撰写→审核→分发（公众号 Mock）流水线，
+    # 'opc.content' / 'opc.content.events' 服务（CE-01~CE-05 算法层）。
+    - id: opc-content
+      name: '../../dist/dsh-plugins/opc-content/src/index.js'

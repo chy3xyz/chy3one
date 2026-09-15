@@ -26,9 +26,11 @@ export interface SplitEntry extends RevenueSplit {
  * 由构造保证 creator + platform === amount，守恒误差恒为 0。
  */
 export class RevenueSplitter {
-  private entries: SplitEntry[] = []
-  private byOrderId = new Map<string, SplitEntry>()
-  private now: () => number
+  // protected：SqliteMarketplace 的 PersistentRevenueSplitter 继承本类，
+  // 构造时从 split_ledger 恢复流水需直接播种（分账规则完全复用，不重写）
+  protected readonly entries: SplitEntry[] = []
+  protected readonly byOrderId = new Map<string, SplitEntry>()
+  protected readonly now: () => number
 
   constructor(now: () => number = Date.now) {
     this.now = now
@@ -71,7 +73,7 @@ export class RevenueSplitter {
 
   /** 清空账本（插件卸载清理 / 测试用） */
   clear(): void {
-    this.entries = []
+    this.entries.length = 0 // readonly 绑定不可重指派，原地清空保持引用稳定
     this.byOrderId.clear()
   }
 }

@@ -7,6 +7,48 @@ import { apply, name, plugin, type SkillForgeService } from './index.js'
 import { createMockContext, type TelemetryBus, type TelemetryEvent } from '../../../dsh-adapter/src/index.js'
 import { verifyPackage, installPackage, type SkillPackage } from '../../../core/src/skill/packager.js'
 
+/** 真实 cordis 4.x Context 结构子集（与 cordis-runtime.test.ts 同款解耦写法） */
+interface Cordis4ContextLike {
+  plugin(p: unknown, ...args: unknown[]): { dispose: () => Promise<void> } & PromiseLike<unknown>
+  get(name: string, strict?: boolean): unknown
+  on(name: string, listener: (...args: any[]) => unknown): () => boolean
+  emit(name: string, ...args: unknown[]): void
+}
+
+async function loadCordis(): Promise<{ new (): Cordis4ContextLike }> {
+  const mod = (await import('@deepseek-ai/cordis')) as { Context: new () => Cordis4ContextLike }
+  return mod.Context
+}
+
+/**
+ * 按真实 DSH 'session/event' firehose 语义喂工具事件流：
+ * listener 以 (session, event) 双参派发（dsh-session/lib/index.js:1196-1202），
+ * 事件载荷形状对齐 dsh-agent-loop/lib/index.js:687/713 的 append 调用；
+ * 串行执行下 call→result 逐工具交错到达。
+ */
+function emitToolRound(
+  ctx: Cordis4ContextLike,
+  session: { id: string },
+  round: number,
+  tools: string[],
+  opts: { failAll?: boolean; seqRef?: { n: number } } = {},
+) {
+  const seq = opts.seqRef ?? { n: 0 }
+  const emit = (type: string, data: Record<string, unknown>) =>
+    ctx.emit('session/event', session, { type, seq: seq.n++, time: Date.now(), data })
+  for (let i = 0; i < tools.length; i++) {
+    const callId = `call-${round}-${i}`
+    emit('tool/call', { turn: round, step: 1, callId, name: tools[i], arguments: '{}' })
+    const failed = opts.failAll === true
+    emit('tool/result', {
+      turn: round,
+      step: 1,
+      message: { callId, content: [{ type: 'text', text: failed ? 'Error: boom' : 'ok' }], isError: failed },
+      ...(failed ? { error: { name: 'ExecError', code: 'X' } } : {}),
+    })
+  }
+}
+
 function observation(seq: number): { taskSignature: string; tools: string[]; success: boolean; timestamp: number } {
   return {
     taskSignature: 'contract-review',
@@ -101,6 +143,67 @@ test('plugin: 真实载荷形状（provider/model + toolObservation）同样可�
     assert.deepEqual(returned, real) // 放行不改载荷
   }
   assert.equal(forge.listDrafts().length, 1)
+})
+
+test('plugin: 真实 session/event 工具事件流喂饱 PatternMiner（真实 cordis 运行时）', async () => {
+  const Context = await loadCordis()
+  const ctx = new Context()
+  const fiber = ctx.plugin(plugin, { minRepetitions: 3, minSuccessRate: 0.8 })
+  await Promise.resolve(fiber)
+
+  const forge = ctx.get('opc.skillforge') as SkillForgeService
+  assert.ok(forge, '真实 cordis 上应解析到 opc.skillforge 服务')
+
+  // 3 轮 call→result，每轮同一工具序列：真实事件流应直接驱动蒸馏（本能提炼前提）
+  const session = { id: 'sess-fixture' }
+  const tools = ['pdf_reader', 'clause_extractor', 'risk_scorer']
+  const seqRef = { n: 0 }
+  for (let round = 1; round <= 3; round++) emitToolRound(ctx, session, round, tools, { seqRef })
+
+  const drafts = forge.listDrafts()
+  assert.ok(drafts.length >= 1, '真实事件流应产出草案')
+  // 完整 3 步序列的草案存在（增量观测也会覆盖 1/2 步前缀，此处断言全序列草案）
+  const full = drafts.find((d) => d.skillDefinition.toolSequence.length === tools.length)
+  assert.ok(full, '应包含完整工具序列草案')
+  assert.deepEqual(full.skillDefinition.toolSequence, tools)
+  assert.equal(full.name, 'skill-sess-fixture-3steps') // taskSignature=会话标识
+
+  await fiber.dispose()
+  assert.equal(ctx.get('opc.skillforge'), undefined, 'dispose 后服务撤销（AC-07）')
+})
+
+test('plugin: observeRealEvents=false 关闭真实事件路径（仅回退生效）', async () => {
+  const Context = await loadCordis()
+  const ctx = new Context()
+  const fiber = ctx.plugin(plugin, { minRepetitions: 3, minSuccessRate: 0.8, observeRealEvents: false })
+  await Promise.resolve(fiber)
+
+  const forge = ctx.get('opc.skillforge') as SkillForgeService
+  const session = { id: 'sess-fixture' }
+  for (let round = 1; round <= 3; round++) {
+    emitToolRound(ctx, session, round, ['pdf_reader', 'clause_extractor', 'risk_scorer'])
+  }
+  assert.equal(forge.listDrafts().length, 0, '关闭后真实事件流不产生观测')
+
+  await fiber.dispose()
+})
+
+test('plugin: 真实事件成败推断——isError 全失败序列达不到门控，不蒸馏', async () => {
+  const Context = await loadCordis()
+  const ctx = new Context()
+  const fiber = ctx.plugin(plugin, { minRepetitions: 3, minSuccessRate: 0.8 })
+  await Promise.resolve(fiber)
+
+  const forge = ctx.get('opc.skillforge') as SkillForgeService
+  const session = { id: 'sess-fail' }
+  // 3 轮全部失败（message.isError=true + error 字段）：任意前缀成功率恒为 0，
+  // 不得出任何草案——证明成败是从真实 result 载荷推断的，而非默认成功
+  for (let round = 1; round <= 3; round++) {
+    emitToolRound(ctx, session, round, ['pdf_reader', 'clause_extractor', 'risk_scorer'], { failAll: true })
+  }
+  assert.equal(forge.listDrafts().length, 0, '全失败流不得蒸馏任何草案')
+
+  await fiber.dispose()
 })
 
 test('plugin: 打包+验签+安装闭环 (AC-02 / AR-S05)', async () => {

@@ -63,8 +63,10 @@ export class OrderStateError extends OpcError {
  * 除 markPaid 幂等外，任何越状态转移抛 OpcError('ORDER_STATE_INVALID')。
  */
 export class OrderEngine {
-  private orders = new Map<string, Order>()
-  private now: () => number
+  // protected：SqliteMarketplace 的 PersistentOrderEngine 继承本类，
+  // 构造时从库恢复订单需直接播种此表（state 机逻辑全部复用，不重写）
+  protected readonly orders = new Map<string, Order>()
+  protected readonly now: () => number
 
   constructor(now: () => number = Date.now) {
     this.now = now

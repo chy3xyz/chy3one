@@ -2,18 +2,27 @@
  * opc-marketplace：Skill 交易支付与创作者分成插件（PRD 6.1 SF-05/SF-06、US-05）。
  * 组合 core 的 OrderEngine / RevenueSplitter / MockMicropaymentProvider，
  * 通过 OpcContext 注册为具名服务，业务侧零硬依赖（AR-C06）。
+ * 配置 ordersDb 时换用 SqliteMarketplaceStore 持久化引擎：订单与分成 ledger
+ * 重启即恢复（PRD 8.2 orders 表意图），路径解析语义同 opc-console 的 dataDir。
  */
+import { resolve } from 'node:path'
 import { OpcError } from '../../../core/src/index.js'
 import {
   OrderEngine,
   RevenueSplitter,
   MockMicropaymentProvider,
+  SqliteMarketplaceStore,
+  PersistentOrderEngine,
+  PersistentRevenueSplitter,
   type Order,
   type SplitEntry,
 } from '../../../core/src/marketplace/index.js'
 import { defineOpcPlugin, type OpcContext } from '../../../dsh-adapter/src/index.js'
 
 export const name = 'opc-marketplace'
+
+/** 订单/分成持久化库的默认路径（dataDir 语义：相对 cwd 解析） */
+export const DEFAULT_ORDERS_DB = './opcos-orders.db'
 
 export interface Config {
   /** 计价单位：全部金额以整数"分"计算（PRD 8.2 orders/skills 价格口径） */
@@ -22,6 +31,12 @@ export interface Config {
   now?: () => number
   /** 微支付模拟参数（SF-06：失败率/延迟） */
   payment?: { failureRate?: number; latencyMs?: number }
+  /**
+   * 订单/分成 SQLite 库路径（默认建议 DEFAULT_ORDERS_DB = './opcos-orders.db'）。
+   * 设置后用 PersistentOrderEngine / PersistentRevenueSplitter 替代内存版，
+   * 二者共享同一 DatabaseSync；不设置保持纯内存（默认，向后兼容）。
+   */
+  ordersDb?: string
 }
 
 export type PayResult = { order: Order; split: SplitEntry }
@@ -30,8 +45,10 @@ export function apply(ctx: OpcContext, config: Config) {
   if (config.currency !== 'cents') {
     throw new OpcError('CURRENCY_UNSUPPORTED', `currency must be 'cents' (integer minor units), got '${String(config.currency)}'`)
   }
-  const orders = new OrderEngine(config.now)
-  const revenue = new RevenueSplitter(config.now)
+  // ordersDb 配置即启用持久化：订单与分成共享同一 SQLite 连接（WAL），重启后全量恢复
+  const store = config.ordersDb !== undefined ? new SqliteMarketplaceStore(resolve(config.ordersDb)) : undefined
+  const orders = store ? new PersistentOrderEngine(store, config.now) : new OrderEngine(config.now)
+  const revenue = store ? new PersistentRevenueSplitter(store, config.now) : new RevenueSplitter(config.now)
   const provider = new MockMicropaymentProvider(config.payment)
 
   /**
@@ -65,8 +82,12 @@ export function apply(ctx: OpcContext, config: Config) {
 
   ctx.onDispose(() => {
     for (const revoke of revokes) revoke()
-    orders.clear()
-    revenue.clear()
+    if (store) {
+      store.close() // 持久化模式：落盘收尾，绝不清库（clear 会把已持久化订单/流水删光）
+    } else {
+      orders.clear()
+      revenue.clear()
+    }
   })
 }
 
