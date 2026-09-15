@@ -217,5 +217,7 @@ ctx.inject(["webServer"], (webCtx) => {
 - 前端部署路径自感知：`API_BASE = location.pathname.startsWith('/opcos') ? '/opcos' : ''`，standalone/hosted 同一份静态文件。
 - 启动器注入实测：官方 GUI 页面（authed index）含 opc-launcher 全套元素，点击弹出全屏控制台，徽标"运行中"、数据正常。
 - 已知点：`/opcos` 路由不经过 DSH 的 401 认证网关（认证属 fallback/index 层）——公网部署需在 handler 内自行鉴权或置于反代之后（M5 待办）。
+- **代码生效契约**：静态文件（static/）热读源码目录，改动即生效（响应已带 `cache-control: no-store`，防启发式缓存陈旧——曾发生 app.js 陈旧事故）；API 层（api.ts 编译进 dist）随进程固化——**改 API 必须重启 `dsh web`**，否则新面板请求 404。
+- 前端渲染串行化：面板渲染走 Promise 链，杜绝并发渲染的过期覆盖（首帧竞态事故修复，2026-09-15）。
 
 > 注：M4 表内数字为各里程碑收口时点值；当前全量测试数以 `npm test` 实时输出为准（本评估时点为 174）。

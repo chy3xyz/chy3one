@@ -157,19 +157,25 @@
       const m = /^#\/([a-z]+)/.exec(location.hash);
       return m && ROUTE_NAMES.includes(m[1]) ? m[1] : 'overview';
     },
-    async renderPanel() {
-      const name = router.current();
-      $$('#sidenav a').forEach(a => a.classList.toggle('active', a.dataset.route === name));
-      const box = $('#main');
-      box.innerHTML = '';
-      box.append(ui.loading());
-      try {
-        await ROUTES[name](box);
-      } catch (err) {
-        render(box, h('div', { class: 'card panel-error' },
-          h('h3', { text: '面板加载失败' }),
-          h('p', { class: 'muted', text: `${(err && err.code) || 'ERROR'}：${(err && err.message) || ''}` })));
-      }
+    _chain: Promise.resolve(),
+    renderPanel() {
+      // 串行化渲染：并发时后到者的结果覆盖先到者（首帧竞态——start() 自动渲染
+      // overview 的 fetch 在飞行中用户点击导航，旧结果晚到覆盖新面板）
+      router._chain = router._chain.then(async () => {
+        const name = router.current();
+        $$('#sidenav a').forEach(a => a.classList.toggle('active', a.dataset.route === name));
+        const box = $('#main');
+        box.innerHTML = '';
+        box.append(ui.loading());
+        try {
+          await ROUTES[name](box);
+        } catch (err) {
+          render(box, h('div', { class: 'card panel-error' },
+            h('h3', { text: '面板加载失败' }),
+            h('p', { class: 'muted', text: `${(err && err.code) || 'ERROR'}：${(err && err.message) || ''}` })));
+        }
+      }).catch(() => {});
+      return router._chain;
     },
     start() {
       window.addEventListener('hashchange', () => router.renderPanel());

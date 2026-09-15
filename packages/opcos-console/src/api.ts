@@ -253,7 +253,12 @@ export function resolveStaticDir(): string {
 
 function sendFile(res: ServerResponse, status: number, filePath: string): void {
   const contentType = CONTENT_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
-  res.writeHead(status, { 'content-type': contentType })
+  // 控制台追求即时生效：禁用浏览器启发式缓存（曾发生 app.js 陈旧事故），
+  // hosted 模式下静态文件热读源码目录，禁存保证 API 代码重启后前端立刻同步
+  res.writeHead(status, {
+    'content-type': contentType,
+    'cache-control': 'no-store',
+  })
   res.end(readFileSync(filePath))
 }
 
