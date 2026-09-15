@@ -94,3 +94,12 @@ test('smoke: a11y 与主题联动标记（role="status" / scope="col" / .opc-lig
   assert.ok(!indexHtml.includes('<script src=') || /<script src="app\.js"><\/script>/.test(indexHtml))
   assert.equal([...indexHtml.matchAll(/<script(?![^>]*src=)/g)].length, 0, 'index.html 不得有内联脚本')
 })
+
+test('smoke: 文案禁用词——「提交」「操作成功」不得作为按钮 / toast 文案（console-voice §6）', () => {
+  // 变量名与注释不在检查范围，按用户可见文案模式放宽匹配（text 通道 + 字符串字面量）
+  assert.ok(
+    !appJs.includes("text: '提交'") && !appJs.includes("'提交'"),
+    '禁用词「提交」不得作为按钮/toast 文案字面量出现',
+  )
+  assert.ok(!appJs.includes('操作成功'), '禁用词「操作成功」不得出现在任何用户可见文案')
+})

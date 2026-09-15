@@ -74,14 +74,14 @@
         });
       } catch {
         const err = { code: 'NETWORK_ERROR', message: `无法访问 ${path}，请检查服务状态` };
-        toast.err(`${err.code}：${err.message}`);
+        toast.err(`出了点小状况（${err.code}）。创意和收入数据不受影响，重试即可`);
         throw err;
       }
       let data = null;
       try { data = await res.json(); } catch { /* 204 等空响应 */ }
       if (!res.ok) {
         const err = (data && data.error) || { code: `HTTP_${res.status}`, message: res.statusText || '请求失败' };
-        toast.err(`${err.code}：${err.message}`);
+        toast.err(`出了点小状况（${err.code}）。创意和收入数据不受影响，重试即可`);
         throw err;
       }
       return data;
@@ -196,7 +196,7 @@
     },
   };
 
-  /* ===== 面板：总览 ===== */
+  /* ===== 面板：总览（创意变现漏斗） ===== */
   const timeline = events => events.length
     ? h('ul', { class: 'timeline' }, events.map(ev => h('li', { class: 'timeline-item' },
         h('div', { class: 'tl-head' },
@@ -206,28 +206,128 @@
     : ui.empty('暂无埋点事件');
 
   ROUTES.overview = async box => {
-    const o = (await api.get('/api/overview')) || {};
-    const bb = o.blackboard || {};
-    const orders = o.orders || {};
+    const ideasNum = h('span', { class: 'funnel-num', text: '—' }),
+      runsNum = h('span', { class: 'funnel-num', text: '—' }),
+      publishedNum = h('span', { class: 'funnel-num ok', text: '—' }),
+      draftsNum = h('span', { class: 'funnel-num', text: '—' }),
+      listedNum = h('span', { class: 'funnel-num ok', text: '—' }),
+      orderRevenueNum = h('span', { class: 'funnel-num ok', text: '—' }),
+      raasRevenueNum = h('span', { class: 'funnel-num ok', text: '—' }),
+      ideaInput = h('input', { class: 'input', placeholder: '随时记下一个创意，如：宠物经济测评' }),
+      ideaBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '记下这个创意' }),
+      runBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '运行内容流水线' }),
+      recentBox = h('div'),
+      healthLine = h('p', { class: 'muted small funnel-health', text: '系统状态加载中…' }),
+      telemetryBox = h('div');
+
+    /** 漏斗数字原位刷新（不重绘整面板，保留创意输入框状态） */
+    const setNum = (node, v) => { node.textContent = v === null || v === undefined ? '—' : String(v); };
+    const refreshFunnel = async () => {
+      const f = (await api.get('/api/funnel')) || {};
+      const contents = f.contents || {}, skills = f.skills || {}, revenue = f.revenue || {};
+      setNum(ideasNum, f.ideas);
+      setNum(runsNum, contents.runs);
+      setNum(publishedNum, contents.published);
+      setNum(draftsNum, skills.drafts);
+      setNum(listedNum, skills.listed);
+      setNum(orderRevenueNum, money(revenue.orderNetCents));
+      setNum(raasRevenueNum, yuan(revenue.raasRevenueYuan));
+    };
+    const loadRecent = () => loadInto(recentBox, null, async () => {
+      const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
+      if (!ideas.length) return ui.empty('还没有创意：在上方漏斗记下第一个创意，运行流水线时将驱动选题');
+      return h('ul', { class: 'idea-list' }, ideas.slice(0, 5).map(e => h('li', {},
+        h('span', { class: 'idea-text', text: e.content || '' }),
+        h('span', { class: 'idea-time', text: fmtTime(e.createdAt) }))));
+    }, '最近创意加载失败');
+    const loadHealth = async () => {
+      try {
+        const data = (await api.get('/api/health')) || {};
+        const plugins = data.plugins || [];
+        healthLine.textContent = '系统状态：'
+          + (plugins.length
+            ? plugins.map(p => `${p.name} ${p.ok ? '正常' : '隔离'}`).join(' · ')
+            : '插件清单为空');
+      } catch { healthLine.textContent = '系统状态：不可用'; }
+    };
+    const loadTelemetry = () => loadInto(telemetryBox, null, async () => {
+      const o = (await api.get('/api/overview')) || {};
+      return timeline((o.telemetry && o.telemetry.recent) || []);
+    }, '埋点加载失败');
+
+    // 段1 创意：行内快捷录入 → POST /api/ideas → toast + 漏斗数字即时 +1 + 刷新最近创意
+    busyBtn(ideaBtn, '记录中…', async () => {
+      const text = ideaInput.value.trim();
+      if (!text) return toast.err('先写下创意内容再记录');
+      const res = await api.post('/api/ideas', { text });
+      toast.ok((res && res.hint) || '已记下。跑一次「出作品」，它会变成你的选题');
+      ideaInput.value = '';
+      if (ideasNum.textContent !== '—') ideasNum.textContent = String(Number(ideasNum.textContent) + 1);
+      await loadRecent();
+      refreshFunnel().catch(() => {}); // 后台校准全漏斗（错误已由 api 层 toast）
+    });
+    onEnter(ideaInput, () => ideaBtn.click());
+    // 段2 作品：一键运行内容流水线（创意 → 选题 → 撰写 → 审核 → 发布）
+    busyBtn(runBtn, '运行中…（LLM 模式可能数秒）', async () => {
+      const r = await api.post('/api/content/run', {});
+      toast.ok(r && r.publish && r.publish.url
+        ? `流水线完成，已发布到 ${r.publish.platform}：${((r.brief || {}).title) || ''}`
+        : '流水线已运行（本次未发布）');
+      await refreshFunnel();
+    });
+
+    const stage = (title, ...children) => h('div', { class: 'funnel-step' },
+      h('div', { class: 'funnel-stage', text: title }), ...children);
+    const arrow = () => h('div', { class: 'funnel-arrow', 'aria-hidden': 'true', text: '→' });
+    const numLine = (node, unit) => h('div', { class: 'funnel-num-line' }, node,
+      h('span', { class: 'funnel-unit', text: unit }));
+
     render(box,
-      ui.pageTitle('总览', '四大变现系统运行状态一览'),
-      h('div', { class: 'card-grid' }, [
-        ui.statCard('团队模板数 · AI Startup-in-a-Box', num((o.team || {}).templates)),
-        ui.statCard('黑板条数 · 共享工作区', num(Number(bb.global || 0) + Number(bb.workflow || 0)),
-          `global ${num(bb.global)} · workflow ${num(bb.workflow)}`),
-        ui.statCard('市场 Skill 数 · Skill Forge', num((o.market || {}).skills)),
-        ui.statCard('订单净交易 / 收入', `${num(orders.netRevenue)} 笔`,
-          `已支付 ${num(orders.totalPaid)} 笔 · 退款 ${num(orders.refunded)} 笔`),
-        ui.statCard('RaaS 计费收入 · Digital Employee', yuan((o.billing || {}).revenue)),
-        ui.statCard('记忆条数 · Content Engine 记忆库', num((o.memory || {}).count)),
-      ]),
-      ui.sectionCard('最近埋点事件', timeline((o.telemetry && o.telemetry.recent) || [])));
+      ui.pageTitle('创意变现', '今天，你的创意走到哪一步了？'),
+      ui.sectionCard(null,
+        h('div', { class: 'funnel' },
+          stage('① 记下的创意 · 选题记忆',
+            numLine(ideasNum, '条创意'),
+            h('div', { class: 'funnel-action' },
+              h('div', { class: 'funnel-input-row' }, ideaInput, ideaBtn))),
+          arrow(),
+          stage('② 发出的作品 · 内容流水线',
+            numLine(runsNum, '次运行'),
+            h('div', { class: 'funnel-sub' }, '已发布 ', publishedNum, ' 篇'),
+            h('div', { class: 'funnel-action' }, runBtn)),
+          arrow(),
+          stage('③ 在售的技能 · 草案上架',
+            numLine(draftsNum, '个草案'),
+            h('div', { class: 'funnel-sub' }, listedNum, ' 个在售'),
+            h('div', { class: 'funnel-action funnel-links' },
+              h('a', { href: '#/skills', text: '查看草案上架 →' }))),
+          arrow(),
+          stage('④ 到手的收入 · 订单 + RaaS',
+            numLine(orderRevenueNum, '订单净额'),
+            h('div', { class: 'funnel-sub' }, 'RaaS 计费 ', raasRevenueNum),
+            h('div', { class: 'funnel-action funnel-links' },
+              h('a', { href: '#/orders', text: '订单交易' }),
+              h('a', { href: '#/billing', text: 'RaaS 计费' })))),
+        h('p', { class: 'muted small', style: 'margin:10px 0 0',
+          text: '创意直写选题记忆驱动内容流水线；作品沉淀的本能蒸馏为 Skill 上架，订单分成与 RaaS 计费构成双通道收入，全程沉淀记忆资产反哺创意。' })),
+      ui.sectionCard('最近创意', recentBox),
+      healthLine,
+      h('details', { class: 'collapse' },
+        h('summary', { text: '最近埋点事件（系统埋点时间线）' }),
+        telemetryBox));
+
+    await Promise.all([
+      refreshFunnel().catch(() => {}),
+      loadRecent(),
+      loadHealth(),
+      loadTelemetry(),
+    ]);
   };
 
   /* ===== 面板：团队 ===== */
   ROUTES.team = async box => {
     const goalInput = h('input', { class: 'input', type: 'text', placeholder: '例如：帮我做一个跨境电商独立站' }),
-      submitBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '解析并组建团队' }),
+      submitBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '组队开工' }),
       resultBox = h('div'),
       templatesBox = h('div', { class: 'card section-card hidden' });
     let templatesLoaded = false;
@@ -274,7 +374,7 @@
       }
     });
     render(box,
-      ui.pageTitle('虚拟创业团队', 'AI Startup-in-a-Box：输入创业目标，自动拉起角色 Agent 团队'),
+      ui.pageTitle('AI 团队', '说一句目标，团队替你把活干了'),
       ui.sectionCard(null,
         ui.toolbar(ui.grow(ui.field('创业目标', goalInput)), ui.actions(submitBtn)),
         h('p', { class: 'muted', text: '解析失败时将降级为行业模板选择（跨境电商创业团队、独立开发者团队等）。' })),
@@ -294,7 +394,7 @@
     const onConflict = err => {
       if (err && err.code === 'VERSION_CONFLICT') {
         const cur = err.current || {};
-        toast.info(`任务已被他人更新：v${cur.version ?? '?'} · ${cur.status || '—'} · 认领者 ${cur.claimedBy || '—'}，已刷新任务板`);
+        toast.info(`这条任务刚被别人更新了（v${cur.version ?? '?'}），已为你刷新最新状态`);
         load();
         return true;
       }
@@ -361,7 +461,7 @@
               fmtTime(t.updatedAt),
               taskActions(t),
             ]))
-        : ui.empty('任务板还是空的：添加第一个任务开始协作'));
+        : ui.empty('还没有任务——把下一个创意拆成一件可认领的事'));
     }
     const load = async () => {
       listBox.innerHTML = '';
@@ -382,7 +482,7 @@
     });
     onEnter(titleInput, () => addBtn.click());
     render(box,
-      ui.pageTitle('共享任务板', 'AS-04 全队共享清单：认领 → 完成 → 阻塞，expectedVersion 乐观锁防并发冲突'),
+      ui.pageTitle('共享任务板', '团队在为你的创意干活——谁认领了什么一目了然'),
       ui.sectionCard(null,
         ui.toolbar(ui.grow(ui.field('任务标题', titleInput)), ui.grow(ui.field('当前成员', memberInput)),
           ui.actions(addBtn))),
@@ -398,13 +498,16 @@
     const listBox = h('div'),
       scopeLabel = h('code', { class: 'chip-static', text: 'global' }),
       tabButtons = {};
-    const load = () => loadInto(listBox, null, async () =>
-      ui.table(['Key', '版本', '写入者', '更新时间', '值'],
-        ((((await api.get(`/api/blackboard?scope=${scope}`)) || {}).entries) || []).map(e => [
-          h('code', { class: 'key-code', text: e.key }), `v${e.version ?? 0}`,
-          `${e.writer || '—'}${e.role ? `（${e.role}）` : ''}`, fmtTime(e.updatedAt),
-          ui.jsonBox(e.value),
-        ])), '黑板加载失败，请稍后重试');
+    const load = () => loadInto(listBox, null, async () => {
+      const entries = (((await api.get(`/api/blackboard?scope=${scope}`)) || {}).entries) || [];
+      return entries.length
+        ? ui.table(['Key', '版本', '写入者', '更新时间', '值'], entries.map(e => [
+            h('code', { class: 'key-code', text: e.key }), `v${e.version ?? 0}`,
+            `${e.writer || '—'}${e.role ? `（${e.role}）` : ''}`, fmtTime(e.updatedAt),
+            ui.jsonBox(e.value),
+          ]))
+        : ui.empty('黑板还是空的——orchestrator 的第一条规则从这里写起');
+    }, '黑板加载失败，请稍后重试');
     function switchScope(s) {
       scope = s;
       scopeLabel.textContent = s;
@@ -419,7 +522,7 @@
       roleSelect = h('select', { class: 'input' },
         h('option', { value: 'orchestrator', text: 'orchestrator（全局可写）' }),
         h('option', { value: 'agent', text: 'agent（仅 workflow）' })),
-      writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '写入黑板' });
+      writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '写到黑板' });
     valueInput.value = '{}';
     busyBtn(writeBtn, '写入中…', async () => {
       const key = keyInput.value.trim();
@@ -435,7 +538,7 @@
       });
       if (res && res.status === 'conflict') {
         const winner = res.winner || {};
-        toast.err(`BLACKBOARD_CONFLICT：乐观锁冲突，黑板当前为 v${winner.version ?? '?'}（writer=${winner.writer || '—'}），已回填版本号可重试`);
+        toast.err(`这条黑板条目刚被别人更新了（当前 v${winner.version ?? '?'}，writer=${winner.writer || '—'}），已为你回填版本号，可重试`);
         versionInput.value = String(winner.version ?? 0);
       } else {
         const entry = res.entry || {};
@@ -445,7 +548,7 @@
       load();
     });
     render(box,
-      ui.pageTitle('共享黑板', '多 Agent 共享工作区：全局事实与任务事件，乐观锁并发仲裁'),
+      ui.pageTitle('共享黑板', '团队的公共记忆墙，谁写了什么都能看见'),
       h('div', { class: 'tabs' }, ...['global', 'workflow'].map(s =>
         (tabButtons[s] = h('button', {
           class: 'tab', type: 'button',
@@ -493,12 +596,14 @@
       const data = await api.get(`/api/skills?${params.toString()}`);
       const results = (data && data.results) || [];
       totalText.textContent = `共 ${data && data.total != null ? data.total : results.length} 个 Skill`;
-      return ui.table(['名称', '版本', '作者', '价格', '下载', '评分', '兼容', '操作'],
-        results.map(s => [
-          s.name, s.version, s.authorId, money(s.price), num(s.downloads),
-          s.rating != null ? `${Number(s.rating).toFixed(1)} / 5` : '—',
-          (s.compat && s.compat.dsh) || '—', installButton(s),
-        ]));
+      return results.length
+        ? ui.table(['名称', '版本', '作者', '价格', '下载', '评分', '兼容', '操作'],
+            results.map(s => [
+              s.name, s.version, s.authorId, money(s.price), num(s.downloads),
+              s.rating != null ? `${Number(s.rating).toFixed(1)} / 5` : '—',
+              (s.compat && s.compat.dsh) || '—', installButton(s),
+            ]))
+        : ui.empty('货架还是空的——跑几次内容流水线，本能系统会替你蒸馏出第一个技能');
     }, '搜索失败，请稍后重试');
     const loadDrafts = () => loadInto(draftsBox, null, async () => {
       const drafts = (((await api.get('/api/skillforge/drafts')) || {}).drafts) || [];
@@ -519,10 +624,10 @@
       if (!drafts.length) return ui.empty('暂无草案：重复执行相似工作流自动蒸馏出草案后，可在此一键上架');
       return h('div', { class: 'card-grid' }, drafts.map(d => {
         const def = d.skillDefinition || {};
-        const btn = h('button', { class: 'btn btn-sm btn-primary', type: 'button', text: '上架到市场' });
+        const btn = h('button', { class: 'btn btn-sm btn-primary', type: 'button', text: '上架收钱' });
         busyBtn(btn, '上架中…', async () => {
           const res = await api.post('/api/skills/publish-draft', {});
-          toast.ok(`已上架：${res && res.skillId} · ${money(990)} · 分类 community`);
+          toast.ok(`「${res && res.skillId}」已上架，定价 ${money(990)}——去货架看看`);
           await Promise.all([loadPublish(), search()]);
         });
         return h('div', { class: 'card' },
@@ -537,7 +642,7 @@
     searchBtn.addEventListener('click', search);
     onEnter(qInput, search);
     render(box,
-      ui.pageTitle('Skill 市场', 'Skill Forge：浏览、搜索、安装技能包，草案一键上架'),
+      ui.pageTitle('上货架', '你的重复劳动，别人愿意付钱'),
       ui.sectionCard('从草案上架（草案 → 签名包 → 市场索引）', publishBox),
       ui.sectionCard(null,
         ui.toolbar(ui.field('关键词 q', qInput), ui.field('类别 category', categoryInput),
@@ -592,7 +697,7 @@
         try {
           const res = await api.post('/api/orders/pay', { orderId: order.id });
           renderSplit(res && res.order, res && res.split);
-          toast.ok(`支付成功：${(res && res.order && res.order.id) || order.id}`);
+          toast.ok(`收到 ${money(res && res.order && res.order.amount)}！创作者分得 ${money(res && res.split && res.split.creator)}，平台 ${money(res && res.split && res.split.platform)}`);
           loadOrders();
         } catch { btn.disabled = false; btn.textContent = '支付'; }
       });
@@ -606,13 +711,16 @@
         return ui.empty('查询订单需要 buyerId');
       }
       const data = await api.get(`/api/orders?buyerId=${encodeURIComponent(buyerId)}`);
-      return ui.table(['订单 ID', 'Skill', '买家', '金额', '状态', '创建时间', '操作'],
-        (((data || {}).orders) || []).map(o => [
-          h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.buyerId || '—',
-          o.amount != null ? money(o.amount) : '—', statusBadge(o.status),
-          o.createdAt ? fmtTime(o.createdAt) : '—',
-          isUnpaid(o.status) ? payButton(o) : '—',
-        ]));
+      const orders = ((data || {}).orders) || [];
+      return orders.length
+        ? ui.table(['订单 ID', 'Skill', '买家', '金额', '状态', '创建时间', '操作'],
+            orders.map(o => [
+              h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.buyerId || '—',
+              o.amount != null ? money(o.amount) : '—', statusBadge(o.status),
+              o.createdAt ? fmtTime(o.createdAt) : '—',
+              isUnpaid(o.status) ? payButton(o) : '—',
+            ]))
+        : ui.empty('还没有订单——把货架链接发给潜在买家');
     }, '订单加载失败');
     busyBtn(orderBtn, '下单中…', async () => {
       const skillId = skillSelect.value;
@@ -633,7 +741,7 @@
     });
     refreshBtn.addEventListener('click', loadOrders);
     render(box,
-      ui.pageTitle('订单交易', 'Skill 购买与支付：创作者 85% / 平台 15% 分成'),
+      ui.pageTitle('订单', '每一笔确认的订单，创作者拿 85%'),
       ui.sectionCard('下单',
         ui.toolbar(ui.grow(ui.field('Skill', skillSelect)), ui.field('买家 buyerId', buyerInput),
           ui.field('金额（分）', amountInput), ui.actions(orderBtn))),
@@ -670,7 +778,7 @@
     };
     const loadCreators = () => loadInto(listBox, null, async () => {
       const creators = (((await api.get('/api/creators')) || {}).creators) || [];
-      if (!creators.length) return ui.empty('暂无创作者分成：在「订单交易」完成一笔支付后即按 85/15 入账');
+      if (!creators.length) return ui.empty('还没有分成入账——上架第一个技能就开始累计');
       return h('div', { class: 'card-grid creator-grid' }, creators.map(c => {
         const card = h('div', { class: 'card creator-card', role: 'button', tabindex: '0', 'data-author': c.authorId },
           h('div', { class: 'role-name', text: c.authorId }),
@@ -684,7 +792,7 @@
       }));
     }, '创作者列表加载失败');
     render(box,
-      ui.pageTitle('创作者中心', 'SF-07 收益统计：创作者余额与分成流水（85% 创作者 / 15% 平台，金额单位：分）'),
+      ui.pageTitle('创作者中心', '你赚到的每一笔，都在这里'),
       listBox,
       ui.sectionCard(null, detailTitle, detailBox));
     await loadCreators();
@@ -701,7 +809,7 @@
       const s = await api.get('/api/bills/summary');
       render(buyerSelect, h('option', { value: '', text: '从已成交买家中选择…' }),
         ...((s && s.buyers) || []).map(b => h('option', { value: b.buyerId, text: `${b.buyerId}（${money(b.spent)}）` })));
-      if (!s || (!s.totalBuyers && !s.totalOrders)) return ui.empty('暂无交易数据：完成一笔 Skill 订单支付后即出账单');
+      if (!s || (!s.totalBuyers && !s.totalOrders)) return ui.empty('还没有客户消费记录');
       return h('div', { class: 'card-grid' }, [
         ui.statCard('总买家数（已成交）', num(s.totalBuyers)),
         ui.statCard('总订单 · 支付成功口径', `${num(s.totalOrders)} 笔`, '含其后退款（stats.totalPaid）'),
@@ -734,7 +842,7 @@
     busyBtn(queryBtn, '查询中…', loadBills);
     onEnter(buyerInput, loadBills);
     render(box,
-      ui.pageTitle('客户账单', 'DE-08 客户账单：买家订单明细与总消费，顶部汇总市场净额与 RaaS 收入'),
+      ui.pageTitle('客户账单', '客户为结果付费的明细，随时对账'),
       summaryBox,
       ui.sectionCard('按买家查询',
         ui.toolbar(ui.grow(ui.field('已成交买家', buyerSelect)), ui.grow(ui.field('买家 ID', buyerInput)),
@@ -750,17 +858,20 @@
       resolutionSelect = h('select', { class: 'input' },
         h('option', { value: 'resolved', text: 'resolved · 自主解决（计费）' }),
         h('option', { value: 'escalated', text: 'escalated · 转人工（免费）' })),
-      completeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '结算任务' }),
+      completeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '结算这一单' }),
       resultBox = h('div'), summaryBox = h('div');
     const loadSummary = () => loadInto(summaryBox, null, async () => {
       const data = await api.get('/api/billing/summary');
+      const records = ((data || {}).records) || [];
       return h('div', {},
         h('div', { class: 'big-number', text: yuan(data && data.totalRevenue) }),
         h('div', { class: 'stat-label', style: 'margin-bottom:14px', text: 'RaaS 总收入' }),
-        ui.table(['任务 ID', '处理结果', '金额'],
-          (((data || {}).records) || []).map(r => [
-            h('code', { class: 'key-code', text: r.taskId }), resolutionBadge(r.resolution), yuan(r.amount),
-          ])));
+        records.length
+          ? ui.table(['任务 ID', '处理结果', '金额'],
+              records.map(r => [
+                h('code', { class: 'key-code', text: r.taskId }), resolutionBadge(r.resolution), yuan(r.amount),
+              ]))
+          : ui.empty('还没有计费记录——数字员工每自主解决一单 ¥2.50'));
     }, '计费汇总加载失败');
     busyBtn(completeBtn, '结算中…', async () => {
       const taskId = taskIdInput.value.trim();
@@ -773,11 +884,13 @@
       render(resultBox, h('p', { class: 'result-line' },
         `任务 ${res.taskId}（${res.resolution}）→ `,
         h('strong', { class: 'ok-text', text: yuan(res.amount) })));
-      toast.ok(`任务已结算：${yuan(res.amount)}`);
+      toast.ok(res.resolution === 'escalated'
+        ? '已转人工处理，这一单不收费'
+        : `这单自主解决，计费 ${yuan(res.amount)}`);
       loadSummary();
     });
     render(box,
-      ui.pageTitle('RaaS 计费', 'Digital Employee 数字员工：按结果付费，自主解决收费、转人工免费'),
+      ui.pageTitle('数字员工计费', 'AI 自己解决问题才收钱，转人工免费'),
       ui.sectionCard('任务结算',
         ui.toolbar(ui.field('任务 taskId', taskIdInput), ui.field('数字员工 agentId', agentIdInput),
           ui.field('处理结果 resolution', resolutionSelect), ui.actions(completeBtn)),
@@ -788,7 +901,8 @@
 
   /* ===== 面板：Content Engine（系统三） ===== */
   ROUTES.content = async box => {
-    const runBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '运行流水线' }),
+    let publishedCount = 0; // 最近 content_publish 事件数（「第 n 份作品」toast 计数用，renderEvents 刷新）
+    const runBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '马上出作品' }),
       resultBox = h('div'),
       eventsBox = h('div'),
       statsBox = h('div');
@@ -823,11 +937,12 @@
       const r = await api.post('/api/content/run', {});
       renderResult(r);
       toast.ok(r && r.publish && r.publish.url
-        ? `流水线完成，已发布到 ${r.publish.platform}`
+        ? `第 ${publishedCount + 1} 份作品发布成功 · 合规分 ${num(r && r.review && r.review.score)}`
         : '流水线已运行（本次未发布）');
       quiet();
     });
     const renderEvents = events => {
+      publishedCount = events.length;
       render(eventsBox, events.length
         ? h('ul', { class: 'timeline' }, events.map(ev => h('li', { class: 'timeline-item' },
             h('div', { class: 'tl-head' },
@@ -836,7 +951,7 @@
             ev.payload
               ? h('div', { class: 'stat-sub', text: `${ev.payload.title || '—'} · ${ev.payload.platform || '—'} · ${num(ev.payload.durationMs)} ms` })
               : null)))
-        : ui.empty('还没有发布事件：点击「运行流水线」后生成'));
+        : ui.empty('还没有作品——记一个创意（回总览），10 秒生成第一篇'));
     };
     const renderStats = (data, events) => {
       const mode = (data && data.mode) || {};
@@ -856,7 +971,7 @@
       } catch { /* 轮询失败静默，保留上一帧 */ }
     };
     render(box,
-      ui.pageTitle('Content Engine', '系统三：选题 → 撰写 → 审核 → 分发（公众号 MVP），发布自动沉淀人设记忆'),
+      ui.pageTitle('出作品', '把创意变成能发布、能涨粉的作品'),
       ui.sectionCard('运行流水线',
         ui.toolbar(ui.actions(runBtn),
           h('span', { class: 'muted small', text: '默认模板策略秒级返回；配置 DeepSeek API Key 后走 LLM 撰写 + 热点分析。' })),
@@ -868,37 +983,78 @@
     autoPoll(eventsBox, quiet);
   };
 
-  /* ===== 面板：记忆库 ===== */
+  /* ===== 面板：创意资产（原记忆库，七类资产 tab + 创意三件套聚合） ===== */
   const MEMORY_CATEGORIES = ['soul', 'user', 'project', 'fact', 'lesson', 'topic', 'rules'];
+  /** 资产语义标签：topic=创意选题 / fact=爆款模式 / soul=人设 / lesson=教训 / rules=红线 / user=受众 / project=矩阵 */
+  const ASSET_LABELS = {
+    topic: '创意选题', fact: '爆款模式', soul: '人设', lesson: '教训',
+    rules: '红线', user: '受众', project: '矩阵',
+  };
+  /** 创意三件套：topic 选题 + fact 爆款模式 + lesson 教训（默认聚合视图，直接反哺选题） */
+  const ASSET_TRIO = ['topic', 'fact', 'lesson'];
+
   ROUTES.memory = async box => {
-    const categorySelect = h('select', { class: 'input' },
-        MEMORY_CATEGORIES.map(c => h('option', { value: c, text: c }))),
-      scopeSelect = h('select', { class: 'input' },
-        ['global', 'workflow', 'agent'].map(s => h('option', { value: s, text: s }))),
-      contentInput = h('textarea', { class: 'input', rows: 3, placeholder: '要写入的记忆内容' }),
-      confidenceInput = h('input', { class: 'input', type: 'number', min: '0', max: '1', step: '0.05', value: '0.8' }),
-      writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '写入记忆' }),
+    let currentView = 'trio';
+    const counts = {},
+      countBadges = { trio: null },
+      tabButtons = {},
+      listBox = h('div'),
       qInput = h('input', { class: 'input', placeholder: '全文关键词' }),
-      filterCategory = h('select', { class: 'input' }, h('option', { value: '', text: '全部类别' }),
-        MEMORY_CATEGORIES.map(c => h('option', { value: c, text: c }))),
-      searchBtn = h('button', { class: 'btn', type: 'button', text: '检索' }),
-      listBox = h('div');
+      searchBtn = h('button', { class: 'btn', type: 'button', text: '检索' });
+    const viewCategories = view => (view === 'trio' ? ASSET_TRIO : [view]);
+
+    // GET /api/memory 单类返回上限 50：徽标按 50 封顶（'50+' 表示“不少于 50”）
+    const loadCounts = async () => {
+      await Promise.all(MEMORY_CATEGORIES.map(async c => {
+        try {
+          const entries = (((await api.get(`/api/memory?category=${c}`)) || {}).entries) || [];
+          counts[c] = entries.length;
+          if (countBadges[c]) countBadges[c].textContent = entries.length >= 50 ? '50+' : String(entries.length);
+        } catch { /* 计数失败保持占位 */ }
+      }));
+      const trioSum = ASSET_TRIO.reduce((s, c) => s + (counts[c] || 0), 0);
+      const trioSaturated = ASSET_TRIO.some(c => (counts[c] || 0) >= 50);
+      if (countBadges.trio) countBadges.trio.textContent = trioSaturated ? `${trioSum}+` : String(trioSum);
+    };
+
     const search = () => loadInto(listBox, '检索中…', async () => {
-      const params = new URLSearchParams();
-      if (qInput.value.trim()) params.set('q', qInput.value.trim());
-      if (filterCategory.value) params.set('category', filterCategory.value);
-      const entries = (((await api.get(`/api/memory${params.toString() ? `?${params}` : ''}`)) || {}).entries) || [];
-      if (!entries.length) return ui.empty('没有匹配的记忆');
+      const q = qInput.value.trim();
+      const grouped = await Promise.all(viewCategories(currentView).map(async category => {
+        const params = new URLSearchParams({ category });
+        if (q) params.set('q', q);
+        return (((await api.get(`/api/memory?${params.toString()}`)) || {}).entries) || [];
+      }));
+      const entries = grouped.flat().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      if (!entries.length) {
+        return ui.empty(currentView === 'trio'
+          ? '资产库是空的——每条创意、每次发布、每个教训都会自动存进来'
+          : '该类资产暂无条目');
+      }
       return h('div', { class: 'card-grid memory-grid' }, entries.map(e => h('div', { class: 'card memory-card' },
         h('div', { class: 'memory-head' },
-          ui.badge(e.category || '—', 'info'),
+          ui.badge(`${ASSET_LABELS[e.category] || e.category || '—'}（${e.category || '—'}）`, 'info'),
           e.confidence != null ? h('span', { class: 'muted small', text: `置信度 ${e.confidence}` }) : null),
         h('p', { class: 'memory-content', text: e.content || '' }),
         h('div', { class: 'stat-sub', text: fmtTime(e.createdAt) }))));
-    }, '记忆检索失败');
+    }, '资产检索失败');
+
+    function switchView(view) {
+      currentView = view;
+      Object.entries(tabButtons).forEach(([key, btn]) => btn.classList.toggle('active', key === view));
+      search();
+    }
+
+    // 写入资产（沿用七类 category + scope + confidence；写入后刷新当前视图与计数徽标）
+    const categorySelect = h('select', { class: 'input' },
+        MEMORY_CATEGORIES.map(c => h('option', { value: c, text: `${ASSET_LABELS[c]}（${c}）` }))),
+      scopeSelect = h('select', { class: 'input' },
+        ['global', 'workflow', 'agent'].map(s => h('option', { value: s, text: s }))),
+      contentInput = h('textarea', { class: 'input', rows: 3, placeholder: '要沉淀的资产内容（创意、爆款模式、教训…）' }),
+      confidenceInput = h('input', { class: 'input', type: 'number', min: '0', max: '1', step: '0.05', value: '0.8' }),
+      writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '存为资产' });
     busyBtn(writeBtn, '写入中…', async () => {
       const content = contentInput.value.trim();
-      if (!content) return toast.err('请填写记忆内容');
+      if (!content) return toast.err('请填写资产内容');
       const confidence = Number(confidenceInput.value);
       await api.post('/api/memory', {
         scope: scopeSelect.value,
@@ -906,24 +1062,37 @@
         content,
         confidence: Number.isFinite(confidence) ? confidence : 0.8,
       });
-      toast.ok(`记忆已写入（${categorySelect.value} / ${scopeSelect.value}）`);
+      toast.ok(`资产已写入（${ASSET_LABELS[categorySelect.value] || categorySelect.value} / ${scopeSelect.value}）`);
       contentInput.value = '';
-      search();
+      await Promise.all([search(), loadCounts()]);
     });
     searchBtn.addEventListener('click', search);
     onEnter(qInput, search);
+
+    // 顶部资产 tab：创意三件套（默认）+ 七类单类视图，各带计数徽标
+    const tabs = h('div', { class: 'tabs asset-tabs' },
+      tabButtons.trio = h('button', { class: 'tab', type: 'button', onclick: () => switchView('trio') },
+        h('span', { text: '创意三件套' }),
+        (countBadges.trio = h('span', { class: 'tab-count', text: '…' }))),
+      ...MEMORY_CATEGORIES.map(c =>
+        tabButtons[c] = h('button', { class: 'tab', type: 'button', onclick: () => switchView(c) },
+          h('span', { text: `${ASSET_LABELS[c]} ${c}` }),
+          (countBadges[c] = h('span', { class: 'tab-count', text: '…' })))));
+
     render(box,
-      ui.pageTitle('记忆库', 'Content Engine 七类记忆：soul / user / project / fact / lesson / topic / rules'),
-      ui.sectionCard('写入记忆',
+      ui.pageTitle('创意资产', '越用越准的创意资产库：人设、爆款模式、踩过的坑'),
+      tabs,
+      ui.sectionCard(null,
+        ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn)),
+        listBox),
+      ui.sectionCard('写入资产',
         ui.toolbar(ui.field('类别 category（七选一）', categorySelect), ui.field('作用域 scope', scopeSelect),
           ui.field('置信度 confidence', confidenceInput)),
         h('div', { class: 'form-grid form-grid-1' }, ui.field('内容 content', contentInput)),
-        ui.toolbar(writeBtn)),
-      ui.sectionCard('记忆检索',
-        ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.field('类别 category', filterCategory),
-          ui.actions(searchBtn)),
-        listBox));
-    await search();
+        ui.toolbar(writeBtn),
+        h('p', { class: 'muted', text: 'topic 类资产即「创意选题」：运行内容流水线时将被选题策略直连为候选，创意 → 内容是现成通路。' })));
+    switchView('trio');
+    await loadCounts();
   };
 
   /* ===== health / 启动 ===== */

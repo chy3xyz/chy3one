@@ -97,6 +97,12 @@ interface ContentService {
   stats(): { runs: number }
   /** 生效模式（不回传任何密钥） */
   mode(): { llm: boolean; hotSearch: boolean }
+  /**
+   * 人设记忆直通（与 opc.memory 服务同形的 MemoryStore，opc-content 插件实有字段）。
+   * Content Engine 持有独立的人设记忆实例，TemplateTopicStrategy 把其中的 topic 记忆
+   * 直连为选题候选（core content/strategy.ts）——创意→内容通路的桥接写入口。
+   */
+  readonly memory: MemoryService
 }
 
 /** 共享任务板服务（opc.team.board 的结构子集，core TaskBoard 同形，AS-04） */
@@ -687,6 +693,29 @@ function isNetPositive(status: Order['status']): boolean {
 }
 
 /**
+ * 订单净额聚合（SF-07/DE-08 与 /api/funnel 共用口径）：分成 ledger join 订单状态，
+ * 仅 paid+delivered 计入净额（单位：分）。/api/bills/summary 的买家维度聚合与
+ * 创意变现漏斗的收入段同源于此，保证两处数字永不漂移。
+ */
+function orderNetAggregates(
+  orders: OrderEngine,
+  revenue: RevenueLedger | undefined,
+): { byBuyer: Map<string, { orders: number; spent: number }>; totalCents: number } {
+  const byBuyer = new Map<string, { orders: number; spent: number }>()
+  let totalCents = 0
+  for (const entry of revenue ? revenue.listEntries() : []) {
+    const order = orders.get(entry.orderId)
+    if (!order || !isNetPositive(order.status)) continue
+    const agg = byBuyer.get(order.buyerId) ?? { orders: 0, spent: 0 }
+    agg.orders += 1
+    agg.spent += order.amount
+    byBuyer.set(order.buyerId, agg)
+    totalCents += order.amount
+  }
+  return { byBuyer, totalCents }
+}
+
+/**
  * 任务板变更统一出口：成功回 Task；VERSION_CONFLICT → 409 并在 error.current 附
  * 当前任务快照（前端据此展示胜者并回填版本）；PermissionError 等其余错误原样上抛，
  * 走 ERROR_STATUS 映射（PERMISSION_DENIED → 403、TASK_NOT_FOUND → 404）。
@@ -742,6 +771,8 @@ const API_PATHS = new Set([
   '/api/billing/summary',
   '/api/billing/complete',
   '/api/memory',
+  '/api/ideas',
+  '/api/funnel',
   '/api/overview',
 ])
 
@@ -1030,17 +1061,7 @@ async function dispatchApi(
       const revenue = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
       const billing = setup.getService('opc.billing') as BillingEngine | undefined
       const stats = orders.stats()
-      const byBuyer = new Map<string, { orders: number; spent: number }>()
-      let orderNetAmountCents = 0
-      for (const entry of revenue ? revenue.listEntries() : []) {
-        const order = orders.get(entry.orderId)
-        if (!order || !isNetPositive(order.status)) continue
-        const agg = byBuyer.get(order.buyerId) ?? { orders: 0, spent: 0 }
-        agg.orders += 1
-        agg.spent += order.amount
-        byBuyer.set(order.buyerId, agg)
-        orderNetAmountCents += order.amount
-      }
+      const { byBuyer, totalCents: orderNetAmountCents } = orderNetAggregates(orders, revenue)
       const raasRevenueYuan = billing ? billing.totalRevenue() : 0
       sendJson(req, res, 200, {
         buyers: [...byBuyer.entries()]
@@ -1106,6 +1127,66 @@ async function dispatchApi(
       return
     }
 
+    case 'POST /api/ideas': {
+      // 创意录入（一等入口）：text 直写 topic 记忆。TemplateTopicStrategy 把 topic 记忆
+      // 直连为选题候选（core content/strategy.ts 生成 personaScore≥4 的 memory 候选），
+      // 所以「创意 → 内容流水线」是现成通路，无需额外编排。
+      const body = await readJsonObject(req)
+      const text = requireString(body, 'text').trim()
+      if (text.length === 0) {
+        throw new OpcError('VALIDATION_ERROR', 'field text must be a non-empty string')
+      }
+      const memory = requireService<MemoryService>(setup, 'opc.memory')
+      const entry = memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
+      // 通路桥接：Content Engine 持有独立的人设记忆实例（'opc.content'.memory 直通），
+      // 镜像一份 topic 进去，运行流水线时选题策略才可见该创意；资产库正本在 opc.memory，
+      // 插件缺席（隔离）时静默跳过，创意录入本身不失败。
+      const content = setup.getService('opc.content') as ContentService | undefined
+      content?.memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
+      sendJson(req, res, 200, { entry, hint: '已进入选题记忆，运行内容流水线时将驱动选题' })
+      return
+    }
+
+    case 'GET /api/ideas': {
+      // 最近创意列表：topic 记忆按时间倒序（供总览漏斗展示）
+      const memory = requireService<MemoryService>(setup, 'opc.memory')
+      const ideas = memory.query({ category: 'topic', limit: 1000 }).sort((a, b) => b.createdAt - a.createdAt)
+      sendJson(req, res, 200, { ideas })
+      return
+    }
+
+    case 'GET /api/funnel': {
+      // 创意变现漏斗（创意 → 作品 → 收入）：一次请求全量返回四段计数；
+      // 个别插件缺席（隔离）时该段降级计 0，不让漏斗整体 503
+      const memory = setup.getService('opc.memory') as MemoryService | undefined
+      const content = setup.getService('opc.content') as ContentService | undefined
+      const forge = setup.getService('opc.skillforge') as SkillForgeService | undefined
+      const orders = setup.getService('opc.marketplace.orders') as OrderEngine | undefined
+      const billing = setup.getService('opc.billing') as BillingEngine | undefined
+      const revenueLedger = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
+      sendJson(req, res, 200, {
+        // 段1 创意：topic 记忆条数（漏斗入口，与 GET /api/ideas 同源）
+        ideas: memory ? memory.query({ category: 'topic', limit: 1000 }).length : 0,
+        // 段2 作品：流水线运行次数 + 已发布篇数（contentEvents 环形缓冲中 content_publish 计数）
+        contents: {
+          runs: content ? content.stats().runs : 0,
+          published: setup.contentEvents.filter((event) => event.type === 'content_publish').length,
+        },
+        // 段3 Skill：本能蒸馏草案数 / 市场在售数
+        skills: {
+          drafts: forge ? forge.listDrafts().length : 0,
+          listed: setup.skillsIndex.count(),
+        },
+        // 段4 收入：订单净额（paid+delivered，与 /api/bills/summary 共用 orderNetAggregates 口径）+ RaaS 计费收入
+        revenue: {
+          orderNetCount: orders ? orders.stats().netRevenue : 0,
+          orderNetCents: orders ? orderNetAggregates(orders, revenueLedger).totalCents : 0,
+          raasRevenueYuan: billing ? billing.totalRevenue() : 0,
+        },
+      })
+      return
+    }
+
     case 'GET /api/overview': {
       // 聚合端点对个别插件缺席保持降级（计 0），不让 /api/overview 整体 503
       const team = setup.getService('opc.team') as TeamService | undefined
@@ -1149,7 +1230,8 @@ async function dispatchApi(
 }
 
 /**
- * REST 端点分发（市场/计费/创作者/账单 + Content Engine 3 条 + 任务板 5 条 + 草案上架 1 条）
+ * REST 端点分发（市场/计费/创作者/账单 + Content Engine 3 条 + 任务板 5 条 + 草案上架 1 条
+ * + 创意变现漏斗 3 条：POST/GET /api/ideas、GET /api/funnel）
  * + OpcError → {error:{code,message}} 映射
  * （原 handleRequest 的 API 半区）。
  * @param urlPrefix hosted 模式传挂载前缀（如 '/opcos'），从 pathname 剥离后再匹配 /api/*

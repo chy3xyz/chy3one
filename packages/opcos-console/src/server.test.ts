@@ -2,6 +2,7 @@
  * opcos-console 集成测试（node:test + 全局 fetch）：
  * 真实 cordis 装载 + HTTP 契约验证——健康握手、组队、黑板写读（乐观锁/权限）、
  * 市场搜索命中预置与验签安装、下单→支付→85/15 分成、计费与汇总、记忆写查、
+ * 创意变现漏斗（创意录入 / 四段漏斗聚合 / 创意→内容通路）、
  * 静态资源与 OpcError 错误映射。每个用例独立 tmpdir，t.after 统一 close + 清理。
  */
 import test from 'node:test'
@@ -525,6 +526,133 @@ test('console: /api/content 流水线运行、stats 与 content_publish 事件�
   assert.ok(event && event.payload.title && event.payload.title.length > 0)
   assert.equal(event?.payload.platform, 'wechat')
   assert.ok(event && event.timestamp > 0)
+})
+
+/* ─────────────── 创意变现漏斗（/api/ideas、/api/funnel） ─────────────── */
+
+interface FunnelBody {
+  ideas: number
+  contents: { runs: number; published: number }
+  skills: { drafts: number; listed: number }
+  revenue: { orderNetCount: number; orderNetCents: number; raasRevenueYuan: number }
+}
+
+interface IdeaEntry {
+  id: string
+  scope: string
+  category: string
+  content: string
+  confidence: number
+  createdAt: number
+}
+
+test('console: /api/ideas 创意录入 → /api/funnel ideas +1、列表倒序含该文本、空 text 400', async (t) => {
+  const { url } = await launch(t)
+
+  // 空库漏斗：四段字段齐全且为基线值（市场预置 3 条示例 Skill）
+  const funnel0 = await getJson<FunnelBody>(`${url}api/funnel`)
+  assert.equal(funnel0.status, 200)
+  assert.equal(funnel0.body.ideas, 0)
+  assert.deepEqual(funnel0.body.contents, { runs: 0, published: 0 })
+  assert.deepEqual(funnel0.body.skills, { drafts: 0, listed: 3 })
+  assert.deepEqual(funnel0.body.revenue, { orderNetCount: 0, orderNetCents: 0, raasRevenueYuan: 0 })
+
+  const list0 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  assert.equal(list0.status, 200)
+  assert.deepEqual(list0.body.ideas, [])
+
+  // 校验：text 必须非空（空串与纯空白都拒绝）
+  const blank = await postJson<{ error: { code: string } }>(`${url}api/ideas`, { text: '' })
+  assert.equal(blank.status, 400)
+  assert.equal(blank.body.error.code, 'VALIDATION_ERROR')
+  const blankish = await postJson<{ error: { code: string } }>(`${url}api/ideas`, { text: '   ' })
+  assert.equal(blankish.status, 400)
+  assert.equal(blankish.body.error.code, 'VALIDATION_ERROR')
+
+  // 录入：topic 记忆 / global scope / confidence 0.8 + hint 指引
+  const created = await postJson<{ entry: IdeaEntry; hint: string }>(`${url}api/ideas`, { text: '宠物经济测评' })
+  assert.equal(created.status, 200)
+  assert.equal(created.body.entry.category, 'topic')
+  assert.equal(created.body.entry.scope, 'global')
+  assert.equal(created.body.entry.confidence, 0.8)
+  assert.equal(created.body.entry.content, '宠物经济测评')
+  assert.ok(created.body.hint.includes('选题记忆'))
+
+  // 漏斗 ideas 计数 +1；最近创意列表含该文本
+  const funnel1 = await getJson<FunnelBody>(`${url}api/funnel`)
+  assert.equal(funnel1.body.ideas, 1)
+  const list1 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  assert.equal(list1.body.ideas.length, 1)
+  assert.equal(list1.body.ideas[0]?.content, '宠物经济测评')
+
+  // 再录一条：列表保持时间倒序，计数继续累加
+  const second = await postJson<{ entry: IdeaEntry }>(`${url}api/ideas`, { text: '银发经济陪诊师' })
+  assert.equal(second.status, 200)
+  const list2 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  assert.equal(list2.body.ideas.length, 2)
+  assert.ok(
+    (list2.body.ideas[0]?.createdAt ?? 0) >= (list2.body.ideas[1]?.createdAt ?? 0),
+    '最近创意列表应按时间倒序',
+  )
+  assert.ok(list2.body.ideas.some((e) => e.content === '银发经济陪诊师'))
+  const funnel2 = await getJson<FunnelBody>(`${url}api/funnel`)
+  assert.equal(funnel2.body.ideas, 2)
+})
+
+test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {
+  const { url } = await launch(t)
+
+  // 创意录入 → 内容通路：TemplateTopicStrategy 把 topic 记忆直连为候选
+  //（personaScore = 4 + confidence 0.8 = 4.8，高于无人设记忆时的常青库 3.0，必被选中）
+  const idea = await postJson<{ entry: IdeaEntry }>(`${url}api/ideas`, { text: '宠物经济测评' })
+  assert.equal(idea.status, 200)
+
+  const run = await postJson<ContentRunBody>(`${url}api/content/run`, {})
+  assert.equal(run.status, 200)
+  assert.equal(run.body.success, true)
+  // 落题断言：录入的创意原文成为被选中的候选标题（模板/LLM 模式均成立——LLM 模式
+  // 落题同样取人设分最高的输入候选，即记忆直连那条）
+  assert.equal(run.body.brief.title, '宠物经济测评', '选题应落题为录入的创意（topic 记忆直连候选）')
+  const runStats = await getJson<{ runs: number; mode: { llm: boolean } }>(`${url}api/content/stats`)
+  assert.equal(runStats.body.runs, 1)
+  if (!runStats.body.mode.llm) {
+    // 模板模式的直连签名：角度固定携带创意原文「围绕进行中选题「<text>」做深度展开…」
+    assert.ok(run.body.brief.angle.includes('宠物经济测评'), '模板模式下选题角度应包含创意原文')
+  }
+
+  // 段4 预置：一笔 delivered 订单 + 一笔 RaaS 计费
+  const order = await postJson<{ id: string; status: string }>(`${url}api/orders`, {
+    skillId: 'photo-studio-pro',
+    version: '1.2.0',
+    buyerId: 'buyer-1',
+    amountCents: 1000,
+  })
+  assert.equal(order.status, 200)
+  const paid = await postJson<{ order: { status: string } }>(`${url}api/orders/pay`, { orderId: order.body.id })
+  assert.equal(paid.body.order.status, 'delivered')
+  const complete = await postJson<{ amount: number }>(`${url}api/billing/complete`, {
+    taskId: 'task-funnel',
+    agentId: 'raas-agent-1',
+    resolution: 'resolved',
+  })
+  assert.equal(complete.body.amount, 2.5)
+
+  // 全漏斗一次请求返回：四段计数与预置一一对应
+  const funnel = await getJson<FunnelBody>(`${url}api/funnel`)
+  assert.equal(funnel.status, 200)
+  assert.equal(funnel.body.ideas, 1)
+  assert.equal(funnel.body.contents.runs, 1)
+  assert.equal(funnel.body.contents.published, 1, 'published = contentEvents 环形缓冲中 content_publish 计数')
+  assert.ok(funnel.body.skills.listed >= 3, '在售 Skill ≥ 预置 3 条示例')
+  assert.equal(funnel.body.skills.drafts, 0)
+  assert.equal(funnel.body.revenue.orderNetCount, 1, 'paid+delivered 笔数（stats.netRevenue 口径）')
+  assert.equal(funnel.body.revenue.orderNetCents, 1000, '订单净额（分）')
+  assert.equal(funnel.body.revenue.raasRevenueYuan, 2.5, 'RaaS 计费收入（元）')
+
+  // 交叉验证：漏斗收入段与 /api/bills/summary 复用同一 orderNetAggregates 口径，数字一致
+  const summary = await getJson<BillsSummaryBody>(`${url}api/bills/summary`)
+  assert.equal(summary.body.orderNetAmountCents, funnel.body.revenue.orderNetCents)
+  assert.equal(summary.body.raasRevenueYuan, funnel.body.revenue.raasRevenueYuan)
 })
 
 interface TaskBody {
