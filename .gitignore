@@ -5,3 +5,4 @@ opcos-console-data/
 .DS_Store
 *.tsbuildinfo
 /tmp/
+memories.jsonl
