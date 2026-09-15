@@ -1,0 +1,27 @@
+{
+  "name": "opcos",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "workspaces": [
+    "packages/*",
+    "packages/dsh-plugins/*"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test \"dist/**/*.test.js\"",
+    "demo": "tsc -p . && node dist/opcos-bundle/src/demo.js",
+    "console": "tsc -p . && node dist/opcos-console/src/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh": "^0.1.5-rc.2"
+  }
+}

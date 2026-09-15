@@ -1,0 +1,68 @@
+# The OPC-OS bundle patch: all five opc-* plugins as ONE insert layer, declared
+# in the same format as @deepseek-ai/dsh-base's cordis.patch.yml (a top-level
+# YAML array of loader patch entries; a bundle layer is a single `- insert`
+# list). Later layers — the user profile's own cordis.patch.yml and `--patch`
+# overlays — address these rows by id, with the last write winning per row.
+#
+# `name` resolution (verified against @deepseek-ai/cordis-plugin-loader's
+# `EntryTree.import`):
+#   - bare specifiers resolve as packages (two-anchor: dsh installation first,
+#     then the profile directory);
+#   - `.`/`..`-relative specifiers resolve against THIS FILE's URL (the loader
+#     re-anchors `ctx.baseUrl` to each patch file's directory), and `.ts`
+#     specifiers are rewritten to `.js` — never transpiled — so rows must point
+#     at compiled output.
+# This bundle therefore points at this repository's build artifacts:
+#   <repo>/dist/dsh-plugins/<plugin>/src/index.js
+# produced by `npm run build` (tsc: rootDir=packages, outDir=dist). Run the
+# build before booting a profile that mounts this bundle.
+
+- insert:
+    # RaaS 计费：'agent/pre-step'/'agent/request' waterfall 计量，
+    # 'opc.billing' / 'opc.billing.complete' 服务（AC-05）。
+    - id: opc-billing
+      name: '../../dist/dsh-plugins/opc-billing/src/index.js'
+      config:
+        resolvedUnitPrice: 2.5
+
+    # 记忆沉淀 + instinct 埋点：'opc.memory' / 'opc.instinct*' 服务（AC-04）。
+    # 默认落盘到进程 cwd；部署可用与 dsh-base 行相同的 !!js dshHomePath(...)
+    # 表达式按 id 覆盖本行（先确保目录存在），例如：
+    #   memoriesFile: !!js dshHomePath('opcos/memories.jsonl')
+    #   instinctsFile: !!js dshHomePath('opcos/instincts.jsonl')
+    - id: opc-memory
+      name: '../../dist/dsh-plugins/opc-memory/src/index.js'
+      config:
+        memoriesFile: './memories.jsonl'
+        instinctsFile: './instincts.jsonl'
+
+    # 共享黑板：'opc.blackboard' / 'opc.blackboard.events' 服务。
+    # 默认纯内存运行；需要 AC-03 重启不丢数据时按 id 覆盖并加：
+    #   persistFile: !!js dshHomePath('opcos/blackboard.json')
+    - id: opc-blackboard
+      name: '../../dist/dsh-plugins/opc-blackboard/src/index.js'
+
+    # Skill 蒸馏：'opc.skillforge' / 'opc.skillforge.events' 服务（SF-01~SF-04）。
+    - id: opc-skill-forge
+      name: '../../dist/dsh-plugins/opc-skill-forge/src/index.js'
+      config:
+        minRepetitions: 3
+        minSuccessRate: 0.8
+
+    # 组队编排：'opc.team' / 'opc.team.events' 服务（AS-01/AS-02）。
+    - id: opc-team
+      name: '../../dist/dsh-plugins/opc-team/src/index.js'
+      config:
+        tokenBudget: 1000000
+
+    # 统一控制台（DSH Web 入口协同）：auto 模式——宿主已跑 `dsh web` 时挂到
+    # 官方 webServer 的 /opcos 前缀（UI+API 同源同端口）；无 webServer 时回退
+    # 自建 standalone 服务。需要 marketplace 插件提供订单/支付服务。
+    - id: opc-marketplace
+      name: '../../dist/dsh-plugins/opc-marketplace/src/index.js'
+
+    - id: opc-console
+      name: '../../dist/dsh-plugins/opc-console/src/index.js'
+      config:
+        mode: auto
+        port: 3000
