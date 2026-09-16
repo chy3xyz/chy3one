@@ -17,13 +17,23 @@ import { gzipSync } from 'node:zlib'
 
 import {
   OpcError,
+  SqliteIdeaStore,
   SqliteSkillIndex,
+  MemoryBodyHub,
   installFromMarket,
+  GUIDING_QUESTIONS,
+  DOMAIN_KEYS,
+  DOMAIN_LABELS,
+  IDEA_MEMORY_STREAMS,
+  validateDomains,
   type BillingRecord,
   type BlackboardEntry,
   type BlackboardScope,
   type BlackboardWrite,
   type BillingEngine,
+  type DomainKey,
+  type Idea,
+  type IdeaMemoryStream,
   type MarketSkill,
   type MemoryEntry,
   type MemoryQuery,
@@ -33,6 +43,7 @@ import {
   type SkillDefinition,
   type SplitEntry,
   type Task,
+  type ThreeDomains,
   type WriteResult,
 } from '../../core/src/index.js'
 import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
@@ -230,6 +241,7 @@ const ERROR_STATUS: Record<string, number> = {
   PERMISSION_DENIED: 403,
   ORDER_NOT_FOUND: 404,
   SKILL_NOT_FOUND: 404,
+  IDEA_NOT_FOUND: 404,
   NOT_FOUND: 404,
   TASK_NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
@@ -354,6 +366,13 @@ export interface ConsoleDeps {
   handshake?: HandshakeSource
   /** 静态目录：缺省 resolveStaticDir() */
   staticDir?: string
+  /**
+   * 创意实体存储（可选，两入口按 dataDir 构造）。缺省时 /api/ideas 保持
+   * v1 行为（topic 记忆直写），创意实体端点返回 503。
+   */
+  ideaStore?: SqliteIdeaStore
+  /** 创意记忆体枢纽（可选，与 ideaStore 同批构造：FTS5 检索 + 会话级挂载） */
+  memoryHub?: MemoryBodyHub
 }
 
 /** 请求处理层的就绪形态（deps 经默认值补全后的冻结视图） */
@@ -372,6 +391,10 @@ export interface ConsoleSetup {
   /** 退订 content_publish 订阅（owner 关停时调用；幂等） */
   disposeContentEvents(): void
   staticDir: string
+  /** 创意实体存储（缺省 undefined：创意实体端点降级） */
+  readonly ideaStore?: SqliteIdeaStore
+  /** 创意记忆体枢纽（缺省 undefined：挂载/记忆体端点降级） */
+  readonly memoryHub?: MemoryBodyHub
 }
 
 /**
@@ -404,6 +427,8 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
       offContentEvents()
     },
     staticDir: deps.staticDir ?? resolveStaticDir(),
+    ideaStore: deps.ideaStore,
+    memoryHub: deps.memoryHub,
   }
 }
 
@@ -550,6 +575,22 @@ function requireService<T>(setup: ConsoleSetup, name: string): T {
     throw new OpcError('SERVICE_UNAVAILABLE', `service ${name} is not available (plugin quarantined or unloaded)`)
   }
   return service
+}
+
+/** 创意实体存储必取（入口未配置时 503——两入口默认都配置，仅手工裁剪 deps 才会命中） */
+function requireIdeaStore(setup: ConsoleSetup): SqliteIdeaStore {
+  if (!setup.ideaStore) {
+    throw new OpcError('SERVICE_UNAVAILABLE', 'idea store is not configured in console deps')
+  }
+  return setup.ideaStore
+}
+
+/** 创意记忆体必取 */
+function requireMemoryHub(setup: ConsoleSetup): MemoryBodyHub {
+  if (!setup.memoryHub) {
+    throw new OpcError('SERVICE_UNAVAILABLE', 'memory hub is not configured in console deps')
+  }
+  return setup.memoryHub
 }
 
 function readJsonObject(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -772,6 +813,9 @@ const API_PATHS = new Set([
   '/api/billing/complete',
   '/api/memory',
   '/api/ideas',
+  '/api/memory-bodies',
+  '/api/memory-bodies/mount',
+  '/api/guiding-questions',
   '/api/funnel',
   '/api/overview',
 ])
@@ -1128,30 +1172,98 @@ async function dispatchApi(
     }
 
     case 'POST /api/ideas': {
-      // 创意录入（一等入口）：text 直写 topic 记忆。TemplateTopicStrategy 把 topic 记忆
-      // 直连为选题候选（core content/strategy.ts 生成 personaScore≥4 的 memory 候选），
-      // 所以「创意 → 内容流水线」是现成通路，无需额外编排。
+      // 创意录入（一等入口，prd2.md ID-01/ID-03）：文本 → Idea 实体（自动三域草案）
+      // + 目录初始化（memory-body/ledger/token/profile/meta）+ 描述写入记忆体正本。
+      // topic 记忆镜像保留：Content Engine 的选题策略仍从 topic 记忆直连候选，
+      // 「创意 → 内容流水线」通路不变；镜像插件缺席（隔离）时静默跳过。
       const body = await readJsonObject(req)
       const text = requireString(body, 'text').trim()
       if (text.length === 0) {
         throw new OpcError('VALIDATION_ERROR', 'field text must be a non-empty string')
       }
-      const memory = requireService<MemoryService>(setup, 'opc.memory')
-      const entry = memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
-      // 通路桥接：Content Engine 持有独立的人设记忆实例（'opc.content'.memory 直通），
-      // 镜像一份 topic 进去，运行流水线时选题策略才可见该创意；资产库正本在 opc.memory，
-      // 插件缺席（隔离）时静默跳过，创意录入本身不失败。
+      const store = setup.ideaStore
+      if (!store) {
+        // 降级：未配置创意库时保持 v1 行为（topic 记忆直写）
+        const memory = requireService<MemoryService>(setup, 'opc.memory')
+        const entry = memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
+        const content = setup.getService('opc.content') as ContentService | undefined
+        content?.memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
+        sendJson(req, res, 200, { entry, hint: '已进入选题记忆，运行内容流水线时将驱动选题' })
+        return
+      }
+      const optionalName =
+        typeof body.name === 'string' && body.name.trim().length > 0 ? body.name.trim() : undefined
+      const idea = store.create({ text, name: optionalName })
+      const memory = setup.getService('opc.memory') as MemoryService | undefined
+      memory?.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
       const content = setup.getService('opc.content') as ContentService | undefined
       content?.memory.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
-      sendJson(req, res, 200, { entry, hint: '已进入选题记忆，运行内容流水线时将驱动选题' })
+      setup.memoryHub?.write(idea.id, 'description', { content: text, confidence: 0.8, authority: 'user' })
+      sendJson(req, res, 200, {
+        idea,
+        hint: '已生成三域草案并初始化独立记忆体，去「我的创意」迭代三域或运行内容流水线',
+      })
       return
     }
 
     case 'GET /api/ideas': {
-      // 最近创意列表：topic 记忆按时间倒序（供总览漏斗展示）
+      // 创意列表：实体库新建在前；未配置实体库时降级为 topic 记忆伪实体（前端同构渲染）
+      const store = setup.ideaStore
+      if (store) {
+        sendJson(req, res, 200, { ideas: store.list() })
+        return
+      }
       const memory = requireService<MemoryService>(setup, 'opc.memory')
-      const ideas = memory.query({ category: 'topic', limit: 1000 }).sort((a, b) => b.createdAt - a.createdAt)
+      const ideas = memory
+        .query({ category: 'topic', limit: 1000 })
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((entry) => ({
+          id: entry.id,
+          name: entry.content,
+          stage: 'description' as const,
+          domains: null,
+          createdAt: entry.createdAt,
+          updatedAt: entry.createdAt,
+        }))
       sendJson(req, res, 200, { ideas })
+      return
+    }
+
+    case 'GET /api/guiding-questions': {
+      // ID-02 三域引导问题（每域 ≥3 个）
+      sendJson(req, res, 200, { questions: GUIDING_QUESTIONS })
+      return
+    }
+
+    case 'POST /api/memory-bodies/mount': {
+      // 挂载协议（prd2.md 2.4 / 8.3）：/mount <idea-id>... 的控制台等价面
+      const body = await readJsonObject(req)
+      const hub = requireMemoryHub(setup)
+      const rawIds = body.ideaIds
+      if (!Array.isArray(rawIds) || rawIds.length === 0 || rawIds.some((v) => typeof v !== 'string' || v.trim().length === 0)) {
+        throw new OpcError('VALIDATION_ERROR', 'field ideaIds must be a non-empty array of idea ids')
+      }
+      const ideaIds = [...new Set((rawIds as string[]).map((v) => v.trim()))]
+      const actionRaw = body.action
+      if (actionRaw !== undefined && actionRaw !== 'mount' && actionRaw !== 'unmount') {
+        throw new OpcError('VALIDATION_ERROR', 'field action must be one of: mount, unmount')
+      }
+      const action = actionRaw ?? 'mount'
+      const mounted = action === 'unmount' ? hub.unmount(...ideaIds) : hub.mount(...ideaIds)
+      sendJson(req, res, 200, {
+        mounted,
+        hint: action === 'unmount' ? '已卸载：卸载后其记忆不再被跨创意检索命中' : '已挂载：跨创意检索现在只命中挂载清单',
+      })
+      return
+    }
+
+    case 'GET /api/memory-bodies': {
+      // 跨记忆体检索（默认限定已挂载集合）+ 当前挂载清单
+      const hub = requireMemoryHub(setup)
+      const keyword = nonEmptyParam(url.searchParams.get('q'))
+      const limit = parseLimit(url.searchParams.get('limit'), 20, 200)
+      const entries = hub.query({ keyword, limit })
+      sendJson(req, res, 200, { mounted: hub.listMounted(), entries })
       return
     }
 
@@ -1165,8 +1277,12 @@ async function dispatchApi(
       const billing = setup.getService('opc.billing') as BillingEngine | undefined
       const revenueLedger = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
       sendJson(req, res, 200, {
-        // 段1 创意：topic 记忆条数（漏斗入口，与 GET /api/ideas 同源）
-        ideas: memory ? memory.query({ category: 'topic', limit: 1000 }).length : 0,
+        // 段1 创意：实体库优先（与 GET /api/ideas 同源），实体库缺席降级 topic 记忆计数
+        ideas: setup.ideaStore
+          ? setup.ideaStore.count()
+          : memory
+            ? memory.query({ category: 'topic', limit: 1000 }).length
+            : 0,
         // 段2 作品：流水线运行次数 + 已发布篇数（contentEvents 环形缓冲中 content_publish 计数）
         contents: {
           runs: content ? content.stats().runs : 0,
@@ -1210,6 +1326,102 @@ async function dispatchApi(
     }
 
     default: {
+      // 参数路由：创意实体（M1 创意一等公民）
+      //   GET   /api/ideas/:id           详情（实体 + 目录 + 引导问题 + 记忆体近况 + 挂载态）
+      //   PATCH /api/ideas/:id/domains   三域迭代（ID-02：整域或单域，同步写记忆体正本）
+      //   GET  /api/ideas/:id/entries    单创意记忆体检索（?q=&stream=&limit=）
+      //   POST /api/ideas/:id/entries    写入记忆体（stream/content/confidence/authority）
+      if (path.startsWith('/api/ideas/')) {
+        const store = requireIdeaStore(setup)
+        const segments = path.slice('/api/ideas/'.length).split('/').filter((s) => s.length > 0)
+        const ideaId = decodePathSegment(segments[0] ?? '', 'ideaId')
+        const hub = setup.memoryHub
+        if (segments.length === 1) {
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id is not supported`)
+          }
+          const idea = store.require(ideaId)
+          const homeDir = store.homeDir(ideaId) ?? null
+          sendJson(req, res, 200, {
+            idea,
+            home: homeDir
+              ? {
+                  root: homeDir,
+                  memoryBody: join(homeDir, 'memory-body'),
+                  profile: join(homeDir, 'profile', 'cordis.patch.yml'),
+                  ledger: join(homeDir, 'assets', 'ledger.json'),
+                  token: join(homeDir, 'assets', 'token.json'),
+                }
+              : null,
+            guidingQuestions: GUIDING_QUESTIONS,
+            streams: IDEA_MEMORY_STREAMS,
+            entries: hub ? hub.query({ ideaIds: [ideaId], limit: 20 }) : [],
+            mounted: hub ? hub.isMounted(ideaId) : false,
+          })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'domains') {
+          if (method !== 'PATCH') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/domains is not supported`)
+          }
+          const body = await readJsonObject(req)
+          let updated: Idea
+          if (typeof body.domain === 'string') {
+            const key = requireOneOf(body, 'domain', DOMAIN_KEYS) as DomainKey
+            const summary = typeof body.summary === 'string' ? body.summary : undefined
+            const points = Array.isArray(body.points) ? body.points.map((p) => String(p)) : undefined
+            updated = store.updateDomain(ideaId, key, { summary, points })
+            hub?.write(ideaId, 'description', {
+              content: `三域迭代[${DOMAIN_LABELS[key]}] ${updated.domains[key].summary}` +
+                (updated.domains[key].points.length > 0 ? `（要点：${updated.domains[key].points.join('；')}）` : ''),
+              confidence: 0.8,
+              authority: 'user',
+            })
+          } else {
+            const domains = validateDomains(body)
+            updated = store.updateDomains(ideaId, domains)
+            hub?.write(ideaId, 'description', {
+              content: `三域整体迭代 ${JSON.stringify(domains)}`,
+              confidence: 0.8,
+              authority: 'user',
+            })
+          }
+          sendJson(req, res, 200, { idea: updated })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'entries') {
+          if (method === 'GET') {
+            const keyword = nonEmptyParam(url.searchParams.get('q'))
+            const stream = nonEmptyParam(url.searchParams.get('stream'))
+            if (stream !== undefined && !(IDEA_MEMORY_STREAMS as readonly string[]).includes(stream)) {
+              throw new OpcError('VALIDATION_ERROR', `query parameter stream must be one of: ${IDEA_MEMORY_STREAMS.join(', ')}`)
+            }
+            const limit = parseLimit(url.searchParams.get('limit'), 20, 200)
+            const entries = requireMemoryHub(setup).query({
+              keyword,
+              stream: stream as IdeaMemoryStream | undefined,
+              ideaIds: [ideaId],
+              limit,
+            })
+            sendJson(req, res, 200, { entries })
+            return
+          }
+          if (method === 'POST') {
+            const body = await readJsonObject(req)
+            const entry = requireMemoryHub(setup).write(ideaId, requireString(body, 'stream'), {
+              content: requireString(body, 'content'),
+              confidence: requireConfidence(body),
+              ...(body.authority === undefined
+                ? {}
+                : { authority: requireOneOf(body, 'authority', ['user', 'model'] as const) }),
+            })
+            sendJson(req, res, 200, { entry })
+            return
+          }
+          throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/entries is not supported`)
+        }
+        throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+      }
       // 参数路由：GET /api/creators/:authorId → 该作者的累计余额与分成流水（时间倒序）
       if (method === 'GET' && path.startsWith('/api/creators/')) {
         const authorId = decodePathSegment(path.slice('/api/creators/'.length), 'authorId')

@@ -24,6 +24,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import type { TelemetryEvent } from '../../dsh-adapter/src/index.js'
+import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaStore } from '../../core/src/index.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -113,10 +114,16 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const { index, pkgStore, publicKeyPem } = createMarketCatalog(skillsDbPath)
 
   // 4. 埋点：订阅三个 TelemetryBus（team / blackboard / skillforge），收集环形数组；
-  //    content_publish 环形数组由 createApiSetup 阶段订阅 'opc.content.events' 维护
+  //    content_publish 环形数组由 createApiSetup 阶段订阅 'opc.content.events' 进独立环形数组
   const recentTelemetry: TelemetryEvent[] = []
   const telemetryUnsubs = subscribeTelemetry((name) => ctx.get(name), recentTelemetry)
   const recentContentEvents: TelemetryEvent[] = []
+
+  // 4.5 创意一等公民（prd2.md M1）：创意实体库（ideas.db + ideas/ 目录）+ 记忆体枢纽
+  //     （memory-bodies.db FTS5 检索索引 + 会话级挂载）
+  const ideaStore = new SqliteIdeaStore(join(dataDir, 'ideas.db'), join(dataDir, 'ideas'))
+  const bodyIndex = new MemoryBodyIndex(join(dataDir, 'memory-bodies.db'))
+  const memoryHub = new MemoryBodyHub(join(dataDir, 'ideas'), bodyIndex)
 
   const deps: ConsoleDeps = {
     getService: (name) => ctx.get(name),
@@ -129,6 +136,8 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     telemetry: recentTelemetry,
     contentEvents: recentContentEvents,
     handshake,
+    ideaStore,
+    memoryHub,
   }
   const setup = createApiSetup(deps)
 
@@ -157,6 +166,8 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
         if (entry) ctx.registry.delete(entry.plugin)
       }
     }
+    ideaStore.close()
+    bodyIndex.close()
     index.close()
   }
 

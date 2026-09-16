@@ -59,6 +59,15 @@ async function postJson<T>(url: string, body: unknown): Promise<{ status: number
   return { status: res.status, body: (await res.json()) as T }
 }
 
+async function patchJson<T>(url: string, body: unknown): Promise<{ status: number; body: T }> {
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return { status: res.status, body: (await res.json()) as T }
+}
+
 test('console: /api/health 全插件握手 + /api/overview 聚合 + 静态占位与 404', async (t) => {
   const { url } = await launch(t)
 
@@ -537,13 +546,17 @@ interface FunnelBody {
   revenue: { orderNetCount: number; orderNetCents: number; raasRevenueYuan: number }
 }
 
-interface IdeaEntry {
+interface IdeaEntity {
   id: string
-  scope: string
-  category: string
-  content: string
-  confidence: number
+  name: string
+  stage: string
+  domains: {
+    problem: { summary: string; points: string[] }
+    solution: { summary: string; points: string[] }
+    spacetime: { summary: string; points: string[] }
+  } | null
   createdAt: number
+  updatedAt: number
 }
 
 test('console: /api/ideas 创意录入 → /api/funnel ideas +1、列表倒序含该文本、空 text 400', async (t) => {
@@ -557,7 +570,7 @@ test('console: /api/ideas 创意录入 → /api/funnel ideas +1、列表倒序�
   assert.deepEqual(funnel0.body.skills, { drafts: 0, listed: 3 })
   assert.deepEqual(funnel0.body.revenue, { orderNetCount: 0, orderNetCents: 0, raasRevenueYuan: 0 })
 
-  const list0 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  const list0 = await getJson<{ ideas: IdeaEntity[] }>(`${url}api/ideas`)
   assert.equal(list0.status, 200)
   assert.deepEqual(list0.body.ideas, [])
 
@@ -569,34 +582,136 @@ test('console: /api/ideas 创意录入 → /api/funnel ideas +1、列表倒序�
   assert.equal(blankish.status, 400)
   assert.equal(blankish.body.error.code, 'VALIDATION_ERROR')
 
-  // 录入：topic 记忆 / global scope / confidence 0.8 + hint 指引
-  const created = await postJson<{ entry: IdeaEntry; hint: string }>(`${url}api/ideas`, { text: '宠物经济测评' })
+  // 录入：Idea 实体 / description 阶段 / 三域草案（ID-01）+ hint 指引（prd2.md M1）
+  const created = await postJson<{ idea: IdeaEntity; hint: string }>(`${url}api/ideas`, { text: '宠物经济测评' })
   assert.equal(created.status, 200)
-  assert.equal(created.body.entry.category, 'topic')
-  assert.equal(created.body.entry.scope, 'global')
-  assert.equal(created.body.entry.confidence, 0.8)
-  assert.equal(created.body.entry.content, '宠物经济测评')
-  assert.ok(created.body.hint.includes('选题记忆'))
+  assert.match(created.body.idea.id, /^idea-[0-9a-f]{8}$/)
+  assert.equal(created.body.idea.stage, 'description')
+  assert.equal(created.body.idea.name, '宠物经济测评')
+  assert.ok(created.body.idea.domains, '录入应自动生成三域草案')
+  assert.ok((created.body.idea.domains?.problem.summary ?? '').length > 0)
+  assert.ok(created.body.hint.includes('三域草案'))
 
-  // 漏斗 ideas 计数 +1；最近创意列表含该文本
+  // 漏斗 ideas 计数 +1；最近创意列表含该创意（实体形态）
   const funnel1 = await getJson<FunnelBody>(`${url}api/funnel`)
   assert.equal(funnel1.body.ideas, 1)
-  const list1 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  const list1 = await getJson<{ ideas: IdeaEntity[] }>(`${url}api/ideas`)
   assert.equal(list1.body.ideas.length, 1)
-  assert.equal(list1.body.ideas[0]?.content, '宠物经济测评')
+  assert.equal(list1.body.ideas[0]?.name, '宠物经济测评')
 
   // 再录一条：列表保持时间倒序，计数继续累加
-  const second = await postJson<{ entry: IdeaEntry }>(`${url}api/ideas`, { text: '银发经济陪诊师' })
+  const second = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: '银发经济陪诊师' })
   assert.equal(second.status, 200)
-  const list2 = await getJson<{ ideas: IdeaEntry[] }>(`${url}api/ideas`)
+  const list2 = await getJson<{ ideas: IdeaEntity[] }>(`${url}api/ideas`)
   assert.equal(list2.body.ideas.length, 2)
   assert.ok(
     (list2.body.ideas[0]?.createdAt ?? 0) >= (list2.body.ideas[1]?.createdAt ?? 0),
     '最近创意列表应按时间倒序',
   )
-  assert.ok(list2.body.ideas.some((e) => e.content === '银发经济陪诊师'))
+  assert.ok(list2.body.ideas.some((e) => e.name === '银发经济陪诊师'))
   const funnel2 = await getJson<FunnelBody>(`${url}api/funnel`)
   assert.equal(funnel2.body.ideas, 2)
+})
+
+test('console: 创意实体端点（M1）——详情/三域迭代/记忆体检索/挂载隔离/guiding-questions', async (t) => {
+  const { url } = await launch(t)
+
+  // 录入两个创意（带解决域/时空域线索，草案应分桶）
+  const a = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, {
+    text: '独立开发者获客难。我们打算做一个AI落地页生成器。面向出海跨境电商市场。',
+  })
+  const ideaA = a.body.idea
+  const b = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: '宠物上门喂养平台' })
+  const ideaB = b.body.idea
+
+  // 详情：实体 + 目录 + 引导问题（每域 ≥3）+ 记忆体近况 + 挂载态
+  const detail = await getJson<{
+    idea: IdeaEntity
+    home: { root: string; profile: string; ledger: string } | null
+    guidingQuestions: Record<string, string[]>
+    entries: Array<{ stream: string; content: string; authority: string }>
+    mounted: boolean
+  }>(`${url}api/ideas/${ideaA.id}`)
+  assert.equal(detail.status, 200)
+  assert.equal(detail.body.idea.id, ideaA.id)
+  assert.ok(detail.body.home?.profile.endsWith('cordis.patch.yml'))
+  for (const key of ['problem', 'solution', 'spacetime']) {
+    assert.ok((detail.body.guidingQuestions[key] ?? []).length >= 3, `${key} 引导问题不足 3`)
+  }
+  assert.equal(detail.body.mounted, false)
+  assert.equal(detail.body.entries.length, 1, '录入文本应写入 description 流正本')
+  assert.equal(detail.body.entries[0]?.stream, 'description')
+  assert.equal(detail.body.entries[0]?.authority, 'user')
+  assert.ok(detail.body.entries[0]?.content.includes('独立开发者'))
+  // 三域草案分桶（ID-01）
+  assert.ok(ideaA.domains?.solution.summary.includes('落地页'))
+  assert.ok(ideaA.domains?.spacetime.summary.includes('跨境'))
+
+  // 三域迭代（ID-02）：单域更新，其余域保持
+  const patched = await patchJson<{ idea: IdeaEntity }>(`${url}api/ideas/${ideaA.id}/domains`, {
+    domain: 'solution',
+    summary: '对话式配置直接上线的落地页工具',
+    points: ['5 分钟上线', '自带 SEO 检查'],
+  })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.idea.domains?.solution.summary, '对话式配置直接上线的落地页工具')
+  assert.ok(patched.body.idea.domains?.problem.summary.includes('获客难'), '未编辑的域保持原样')
+
+  // 迭代同步写入记忆体正本：description 流新增一条 user 权威条目
+  const entries1 = await getJson<{ entries: Array<{ content: string }> }>(
+    `${url}api/ideas/${ideaA.id}/entries?q=落地页工具`,
+  )
+  assert.equal(entries1.body.entries.length, 1)
+  assert.ok(entries1.body.entries[0]?.content.includes('三域迭代'))
+
+  // 手动写记忆体 + 检索
+  const written = await postJson<{ entry: { id: string } }>(`${url}api/ideas/${ideaA.id}/entries`, {
+    stream: 'research',
+    content: '竞品分析：现有工具定价偏高',
+    confidence: 0.7,
+  })
+  assert.equal(written.status, 200)
+  const research = await getJson<{ entries: Array<{ stream: string }> }>(
+    `${url}api/ideas/${ideaA.id}/entries?stream=research`,
+  )
+  assert.equal(research.body.entries.length, 1)
+
+  // 挂载协议：未挂载时跨创意检索不命中；挂载后命中；卸载后再次隔离
+  const mount0 = await getJson<{ mounted: string[]; entries: Array<unknown> }>(
+    `${url}api/memory-bodies?q=竞品分析`,
+  )
+  assert.deepEqual(mount0.body.mounted, [])
+  assert.equal(mount0.body.entries.length, 0)
+  const mount1 = await postJson<{ mounted: string[] }>(`${url}api/memory-bodies/mount`, {
+    ideaIds: [ideaA.id],
+  })
+  assert.deepEqual(mount1.body.mounted, [ideaA.id])
+  const mount2 = await postJson<{ mounted: string[] }>(`${url}api/memory-bodies/mount`, {
+    ideaIds: [ideaA.id, ideaB.id],
+    action: 'unmount',
+  })
+  assert.deepEqual(mount2.body.mounted, [], '卸载未挂载的 id 幂等忽略')
+
+  await postJson(`${url}api/memory-bodies/mount`, { ideaIds: [ideaA.id, ideaB.id] })
+  const both = await getJson<{ entries: Array<{ ideaId: string }> }>(`${url}api/memory-bodies?q=竞品分析`)
+  assert.equal(both.body.entries.length, 1)
+  assert.equal(both.body.entries[0]?.ideaId, ideaA.id)
+
+  // 404 语义：不存在的创意 / 未配置流名校验
+  const missing = await getJson<{ error: { code: string } }>(`${url}api/ideas/idea-deadbeef`)
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error.code, 'IDEA_NOT_FOUND')
+  const badStream = await postJson<{ error: { code: string } }>(`${url}api/ideas/${ideaA.id}/entries`, {
+    stream: 'bogus',
+    content: 'x',
+    confidence: 0.5,
+  })
+  assert.equal(badStream.status, 400)
+
+  // 引导问题独立端点（ID-02）
+  const gq = await getJson<{ questions: Record<string, string[]> }>(`${url}api/guiding-questions`)
+  assert.equal(gq.status, 200)
+  assert.ok(gq.body.questions.problem.length >= 3)
 })
 
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {
@@ -604,7 +719,7 @@ test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直
 
   // 创意录入 → 内容通路：TemplateTopicStrategy 把 topic 记忆直连为候选
   //（personaScore = 4 + confidence 0.8 = 4.8，高于无人设记忆时的常青库 3.0，必被选中）
-  const idea = await postJson<{ entry: IdeaEntry }>(`${url}api/ideas`, { text: '宠物经济测评' })
+  const idea = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: '宠物经济测评' })
   assert.equal(idea.status, 200)
 
   const run = await postJson<ContentRunBody>(`${url}api/content/run`, {})

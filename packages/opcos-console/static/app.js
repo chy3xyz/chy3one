@@ -159,7 +159,7 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
+  const ROUTE_NAMES = ['overview', 'ideas', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
   const router = {
     current() {
       const m = /^#\/([a-z]+)/.exec(location.hash);
@@ -237,7 +237,7 @@
       const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
       if (!ideas.length) return ui.empty('还没有创意：在上方漏斗记下第一个创意，运行流水线时将驱动选题');
       return h('ul', { class: 'idea-list' }, ideas.slice(0, 5).map(e => h('li', {},
-        h('span', { class: 'idea-text', text: e.content || '' }),
+        h('a', { class: 'idea-text', href: '#/ideas', text: e.name || (e.content || '') }),
         h('span', { class: 'idea-time', text: fmtTime(e.createdAt) }))));
     }, '最近创意加载失败');
     const loadHealth = async () => {
@@ -322,6 +322,163 @@
       loadHealth(),
       loadTelemetry(),
     ]);
+  };
+
+  /* ===== 面板：我的创意（prd2.md M1：创意一等公民 + 三域 + 独立记忆体挂载） ===== */
+  const IDEA_STAGE_LABELS = { description: '创意描述', product: '创意产品', operation: '产品运营', asset: '产品资产' };
+  const IDEA_STAGES = ['description', 'product', 'operation', 'asset'];
+  const DOMAIN_LABELS = { problem: '问题域', solution: '解决域', spacetime: '时空域' };
+  const DOMAIN_KEYS = ['problem', 'solution', 'spacetime'];
+  const STREAM_LABELS = {
+    description: '描述', decisions: '决策', research: '调研', 'model-notes': '模型笔记',
+    facts: '品牌事实', users: '用户', analytics: '运营数据',
+  };
+
+  ROUTES.ideas = async box => {
+    const listBox = h('div');
+    const detailBox = h('div');
+    const mountLine = h('p', { class: 'muted small', style: 'margin:8px 0 0', text: '' });
+    let selectedId = null;
+
+    const refreshMounted = async () => {
+      try {
+        const data = (await api.get('/api/memory-bodies')) || {};
+        const ids = data.mounted || [];
+        mountLine.textContent = ids.length
+          ? `已挂载记忆体：${ids.join(' · ')}——跨创意检索只命中这份清单`
+          : '尚未挂载记忆体：跨创意检索不会命中任何创意，打开详情可挂载';
+      } catch { mountLine.textContent = ''; }
+    };
+
+    const loadList = () => loadInto(listBox, null, async () => {
+      const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
+      if (!ideas.length) return ui.empty('创意库是空的——回总览漏斗记下第一个创意');
+      return h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
+        h('div', { class: 'memory-head' },
+          h('strong', { text: idea.name || idea.id }),
+          ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', 'info')),
+        h('p', { class: 'memory-content', text: (idea.domains && idea.domains.problem.summary) || '三域草案待完善' }),
+        h('div', { class: 'toolbar-actions' },
+          h('button', {
+            class: 'btn btn-sm', type: 'button', text: '打开详情',
+            onclick: () => { selectedId = idea.id; openDetail(); },
+          }),
+          h('span', { class: 'muted small', text: fmtTime(idea.createdAt) })))));
+    }, '创意列表加载失败');
+
+    /** 详情区：阶段进度 + 三域编辑（带引导问题）+ 记忆体检索/写入 + 挂载开关 */
+    async function openDetail() {
+      if (!selectedId) { detailBox.innerHTML = ''; return; }
+      await loadInto(detailBox, '加载创意详情…', async () => {
+        const d = await api.get(`/api/ideas/${selectedId}`);
+        const idea = d.idea;
+        const domains = idea.domains || {};
+        const questions = d.guidingQuestions || {};
+
+        const stepper = h('div', { class: 'tabs' }, IDEA_STAGES.map(s =>
+          h('button', { class: `tab${s === idea.stage ? ' active' : ''}`, type: 'button', disabled: true },
+            h('span', { text: IDEA_STAGE_LABELS[s] }))));
+
+        const domainCards = DOMAIN_KEYS.map(key => {
+          const domain = domains[key] || { summary: '', points: [] };
+          const summaryInput = h('textarea', { class: 'input', rows: 3, placeholder: '这个域讲什么？（引导问题在上方）' });
+          summaryInput.value = domain.summary || '';
+          const pointsInput = h('textarea', { class: 'input', rows: 2, placeholder: '要点，一行一个' });
+          pointsInput.value = (domain.points || []).join('\n');
+          const saveBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存这个域' });
+          busyBtn(saveBtn, '保存中…', async () => {
+            const points = pointsInput.value.split('\n').map(s => s.trim()).filter(Boolean);
+            await api.request('PATCH', `/api/ideas/${idea.id}/domains`, {
+              domain: key, summary: summaryInput.value.trim(), points,
+            });
+            toast.ok(`「${idea.name}」的${DOMAIN_LABELS[key]}已更新`);
+            await Promise.all([openDetail(), loadList()]);
+          });
+          return h('div', { class: 'card memory-card' },
+            h('div', { class: 'memory-head' }, h('strong', { text: DOMAIN_LABELS[key] })),
+            h('ul', { class: 'muted small' }, (questions[key] || []).map(q => h('li', { text: q }))),
+            h('div', { class: 'form-grid form-grid-1' },
+              ui.field('概述 summary', summaryInput), ui.field('要点 points（一行一个）', pointsInput)),
+            h('div', { class: 'toolbar-actions' }, saveBtn));
+        });
+
+        // 记忆体：最近条目 + 检索 + 写入
+        const entriesBox = h('div');
+        const renderEntries = entries => render(entriesBox, entries.length
+          ? h('ul', { class: 'timeline' }, entries.map(e => h('li', { class: 'timeline-item' },
+              h('div', { class: 'tl-head' },
+                ui.badge(`${STREAM_LABELS[e.stream] || e.stream} · ${e.authority === 'model' ? '模型总结' : '用户钦定'}`, 'info'),
+                h('span', { class: 'tl-time', text: fmtTime(e.createdAt) })),
+              h('p', { class: 'memory-content', text: e.content }))))
+          : ui.empty('这条记忆流还是空的——检索、写入或编辑三域都会留痕'));
+        renderEntries(d.entries || []);
+        const qInput = h('input', { class: 'input', placeholder: '在「我的创意」记忆体里全文检索（≥3 字任意子串）' });
+        const searchBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '检索' });
+        const search = () => loadInto(entriesBox, '检索中…', async () => {
+          const params = new URLSearchParams();
+          const q = qInput.value.trim();
+          if (q) params.set('q', q);
+          params.set('limit', '20');
+          const res = await api.get(`/api/ideas/${idea.id}/entries?${params.toString()}`);
+          renderEntries(res.entries || []);
+        }, '记忆体检索失败');
+        searchBtn.addEventListener('click', search);
+        onEnter(qInput, search);
+
+        const streamSelect = h('select', { class: 'input' },
+          Object.keys(STREAM_LABELS).map(s => h('option', { value: s, text: `${STREAM_LABELS[s]}（${s}）` })));
+        const authoritySelect = h('select', { class: 'input' },
+          h('option', { value: 'user', text: '用户钦定（user）' }),
+          h('option', { value: 'model', text: '模型总结（model）' }));
+        const contentInput = h('textarea', { class: 'input', rows: 2, placeholder: '要沉淀进这个创意记忆体的内容' });
+        const writeBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '写入记忆体' });
+        busyBtn(writeBtn, '写入中…', async () => {
+          const content = contentInput.value.trim();
+          if (!content) return toast.err('先写下要沉淀的内容');
+          await api.post(`/api/ideas/${idea.id}/entries`, {
+            stream: streamSelect.value, content, confidence: 0.8, authority: authoritySelect.value,
+          });
+          toast.ok(`已写入「${STREAM_LABELS[streamSelect.value]}」记忆流`);
+          contentInput.value = '';
+          search();
+        });
+
+        const mountBtn = h('button', { class: `btn btn-sm`, type: 'button', text: d.mounted ? '卸载记忆体' : '挂载记忆体' });
+        busyBtn(mountBtn, d.mounted ? '卸载中…' : '挂载中…', async () => {
+          const res = await api.post('/api/memory-bodies/mount', {
+            ideaIds: [idea.id], action: d.mounted ? 'unmount' : 'mount',
+          });
+          toast.ok(res.hint || '挂载状态已更新');
+          await Promise.all([openDetail(), refreshMounted()]);
+        });
+
+        return h('div', { class: 'card section-card' },
+          h('div', { class: 'memory-head' },
+            h('h3', { class: 'card-title', text: idea.name }),
+            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, 'ok')),
+          stepper,
+          h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
+          h('div', { class: 'card-grid' }, domainCards),
+          h('div', { class: 'two-col' },
+            ui.sectionCard('记忆体 · 检索与近况',
+              ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
+              entriesBox),
+            ui.sectionCard('记忆体 · 写入',
+              ui.toolbar(ui.field('记忆流 stream', streamSelect), ui.field('权威 authority', authoritySelect)),
+              h('div', { class: 'form-grid form-grid-1' }, ui.field('内容 content', contentInput)),
+              ui.toolbar(writeBtn),
+              d.home ? h('details', { class: 'collapse' },
+                h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
+                h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)));
+      }, '创意详情加载失败');
+    }
+
+    render(box,
+      ui.pageTitle('我的创意', '每个创意都是独立的生命体：自己的三域描述、自己的记忆体'),
+      ui.sectionCard('创意库', listBox, mountLine),
+      detailBox);
+
+    await Promise.all([loadList(), refreshMounted()]);
   };
 
   /* ===== 面板：团队 ===== */

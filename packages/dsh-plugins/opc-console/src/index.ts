@@ -29,6 +29,7 @@ import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
 
 import { defineOpcPlugin, type OpcContext, type TelemetryEvent } from '../../../dsh-adapter/src/index.js'
+import { MemoryBodyHub, MemoryBodyIndex, SqliteIdeaStore } from '../../../core/src/index.js'
 import {
   createApiSetup,
   createMarketCatalog,
@@ -146,8 +147,15 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
   const ring: TelemetryEvent[] = []
   const telemetryUnsubs = subscribeTelemetry(getService, ring)
 
+  // 创意一等公民（prd2.md M1）：创意实体库 + 记忆体枢纽（FTS5 检索 + 会话级挂载）
+  const ideaStore = new SqliteIdeaStore(join(dataDir, 'ideas.db'), join(dataDir, 'ideas'))
+  const bodyIndex = new MemoryBodyIndex(join(dataDir, 'memory-bodies.db'))
+  const memoryHub = new MemoryBodyHub(join(dataDir, 'ideas'), bodyIndex)
+
   // 关停（LIFO）：市场索引最后关——先撤路由/HTTP server，再退订埋点，最后 close 索引
   ctx.onDispose(() => index.close())
+  ctx.onDispose(() => bodyIndex.close())
+  ctx.onDispose(() => ideaStore.close())
   ctx.onDispose(() => {
     for (const off of telemetryUnsubs) off()
     telemetryUnsubs.length = 0
@@ -162,6 +170,8 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
     billingLogFile: join(dataDir, 'billing.jsonl'),
     quarantineFile: join(dataDir, 'opcos-quarantine.json'),
     telemetry: ring,
+    ideaStore,
+    memoryHub,
     // handshake 缺省 → /api/health 按服务可用性实时探测（probeHandshake）
   })
 }
