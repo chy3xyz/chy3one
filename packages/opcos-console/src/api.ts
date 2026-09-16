@@ -1082,6 +1082,7 @@ const API_PATHS = new Set([
   '/api/market/rankings',
   '/api/market/follows',
   '/api/notifications',
+  '/api/revenue/daily',
   '/api/subscriptions',
   '/api/subscriptions/status',
   '/api/funnel',
@@ -1738,6 +1739,27 @@ async function dispatchApi(
       return
     }
 
+    case 'GET /api/revenue/daily': {
+      // 收入趋势（按日聚合分成流水；供创作者中心趋势图）
+      const revenue = requireService<RevenueLedger>(setup, 'opc.marketplace.revenue')
+      const days = parseLimit(url.searchParams.get('days'), 30, 90)
+      const buckets = new Map<string, { creator: number; platform: number; count: number }>()
+      for (const entry of revenue.listEntries()) {
+        const day = new Date(entry.recordedAt).toISOString().slice(0, 10)
+        const bucket = buckets.get(day) ?? { creator: 0, platform: 0, count: 0 }
+        bucket.creator += entry.creator
+        bucket.platform += entry.platform
+        bucket.count += 1
+        buckets.set(day, bucket)
+      }
+      const series = [...buckets.entries()]
+        .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+        .slice(-days)
+        .map(([day, v]) => ({ day, ...v }))
+      sendJson(req, res, 200, { series, unit: 'cents' })
+      return
+    }
+
     case 'GET /api/notifications': {
       // IM-02：关注创意的阶段变更通知（登录态缺省查自己的，v1 模式显式传 follower）
       const market = requireIdeaMarket(setup)
@@ -2091,6 +2113,38 @@ async function dispatchApi(
             return
           }
           throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/entries is not supported`)
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'persona') {
+          // 品牌人设（CO-02 语义 UI 化）：以 JSON 标记存于 description 流，取最近一条
+          const hub = requireMemoryHub(setup)
+          if (method === 'GET') {
+            const entry = hub
+              .readStream(ideaId, 'description')
+              .reverse()
+              .find((e) => e.content.includes('"idea-persona"'))
+            let persona: string | null = null
+            if (entry) {
+              try {
+                persona = (JSON.parse(entry.content) as { persona?: string }).persona ?? null
+              } catch {
+                persona = null
+              }
+            }
+            sendJson(req, res, 200, { persona })
+            return
+          }
+          if (method === 'POST') {
+            const body = await readJsonObject(req)
+            const persona = requireString(body, 'persona').slice(0, 2000)
+            hub.write(ideaId, 'description', {
+              content: JSON.stringify({ kind: 'idea-persona', persona }),
+              confidence: 0.9,
+              authority: 'user',
+            })
+            sendJson(req, res, 200, { persona, hint: '人设已更新：内容流水线按该人设撰写与评分' })
+            return
+          }
+          throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/persona is not supported`)
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'transition') {
           // 阶段迁移（prd2.md 3.4/4.5）：线性单向，成功写 decisions 正本并重写子OS profile

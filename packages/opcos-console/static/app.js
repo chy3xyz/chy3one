@@ -139,6 +139,16 @@
   }[String(s)] || 'muted');
   const resolutionBadge = r => (r === 'resolved' ? ui.badge('resolved', 'ok') : ui.badge(String(r || '—'), 'muted'));
 
+  /* ===== 零依赖柱状趋势图（CSS 实现，无图表库） ===== */
+  const barChart = items => {
+    if (!items || !items.length) return ui.empty('暂无数据');
+    const max = Math.max(...items.map(i => i.value), 1);
+    return h('div', { class: 'bar-chart' }, items.map(i => h('div', { class: 'bar-col', title: `${i.label}：${i.sub || i.value}` },
+      h('span', { class: 'bar-value', text: i.show != null ? String(i.show) : '' }),
+      h('div', { class: 'bar', style: `height:${Math.max(3, Math.round((i.value / max) * 70))}px` }),
+      h('span', { class: 'bar-label', text: i.label }))));
+  };
+
   /* ===== 交互辅助 ===== */
   /** 按钮异步操作：点击后禁用并显示进行中文案；错误统一由 api 层 toast */
   function busyBtn(btn, pendingText, fn) {
@@ -579,7 +589,18 @@
           await Promise.all([openDetail(), refreshMounted()]);
         });
 
-        // GEO 监测（prd2.md 4.4，阶段三）：刷新 + 平台快照 + 下跌告警
+        // 品牌人设（CO-02 语义 UI 化）：每创意独立人设，内容流水线按它撰写与评分
+        const personaInput = h('textarea', { class: 'input', rows: 2, placeholder: '如：硬核科技评论员——说人话、有数据、敢下结论' });
+        api.get(`/api/ideas/${idea.id}/persona`).then(res => { personaInput.value = res.persona || ''; }).catch(() => {});
+        const personaBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存人设' });
+        busyBtn(personaBtn, '保存中…', async () => {
+          const persona = personaInput.value.trim();
+          if (!persona) return toast.err('先写下这个创意的人设');
+          await api.post(`/api/ideas/${idea.id}/persona`, { persona });
+          toast.ok('人设已更新：后续出作品将按该人设撰写与评分');
+        });
+
+        // GEO 监测（prd2.md 4.4，阶段三）：刷新 + 平台快照 + 历史趋势 + 下跌告警
         const geoBox = h('div');
         const renderGeo = data => {
           const history = (data && data.history) || [];
@@ -592,8 +613,25 @@
             `${Math.round(s.sentiment * 100)}分`,
             fmtTime(s.at),
           ]);
+          // 各平台可见性历史（旧 → 新，柱状趋势）
+          const chronological = [...history].reverse();
+          const trendGroups = Object.entries(chronological.reduce((acc, s) => {
+            (acc[s.platform] ??= []).push(s);
+            return acc;
+          }, {}));
+          const trends = trendGroups.length
+            ? h('div', {}, trendGroups.map(([platform, snaps]) => h('div', { style: 'margin:8px 0' },
+                h('p', { class: 'small', style: 'margin:0 0 4px' }, h('strong', { text: PLATFORM_LABELS[platform] || platform })),
+                barChart(snaps.map(s => ({
+                  label: new Date(s.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+                  value: Math.round(s.visibility * 100),
+                  sub: `可见性 ${Math.round(s.visibility * 100)}%`,
+                  show: `${Math.round(s.visibility * 100)}%`,
+                }))))))
+            : null;
           render(geoBox,
             ui.table(['平台', '可见性', '引用率', '情感', '采集时间'], rows),
+            trends,
             h('p', { class: 'muted small', style: 'margin:6px 0 0',
               text: data && data.config
                 ? `监测平台：${data.config.platforms.join(' / ')} · 告警阈值：可见性下跌 ${Math.round(data.config.alertThreshold * 100)}% · 当前为模拟口径数据（主流 AI 平台无公开可见性 API）`
@@ -747,6 +785,9 @@
             ui.toolbar(ui.actions(geoBtn),
               h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
             geoBox),
+          ui.sectionCard('品牌人设（CO-02，每创意独立）',
+            h('div', { class: 'form-grid form-grid-1' }, ui.field('人设 persona', personaInput)),
+            ui.toolbar(personaBtn)),
           ui.sectionCard('资产与 Token（阶段四）', assetBox),
           ui.sectionCard('创意市场与协同',
             ui.toolbar(ui.actions(publishBtn),
@@ -1460,11 +1501,24 @@
         return card;
       }));
     }, '创作者列表加载失败');
+    const trendBox = h('div');
+    const loadTrend = () => loadInto(trendBox, null, async () => {
+      const data = await api.get('/api/revenue/daily?days=30');
+      const series = (data && data.series) || [];
+      if (!series.length) return ui.empty('还没有入账记录——出第一笔订单后这里会出现每日趋势');
+      return barChart(series.map(s => ({
+        label: s.day.slice(5),
+        value: s.creator + s.platform,
+        sub: `创作者 ${money(s.creator)} · 平台 ${money(s.platform)} · ${s.count} 笔`,
+        show: money(s.creator + s.platform),
+      })));
+    }, '收入趋势加载失败');
     render(box,
       ui.pageTitle('创作者中心', '你赚到的每一笔，都在这里'),
+      ui.sectionCard('近 30 天收入趋势（按日聚合）', trendBox),
       listBox,
       ui.sectionCard(null, detailTitle, detailBox));
-    await loadCreators();
+    await Promise.all([loadCreators(), loadTrend()]);
   };
 
   /* ===== 面板：客户账单（DE-08） ===== */

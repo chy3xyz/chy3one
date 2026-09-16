@@ -23,7 +23,7 @@
 
 ```bash
 npm install
-npm test        # 构建 + 全部测试（357 项）
+npm test        # 构建 + 全部测试（359 项）
 npm run demo    # 整体系统全链路 Demo（真实 cordis，12 步业务闭环）
 npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 ```
