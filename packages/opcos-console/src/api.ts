@@ -282,6 +282,7 @@ const ERROR_STATUS: Record<string, number> = {
   ORDER_NOT_FOUND: 404,
   SKILL_NOT_FOUND: 404,
   IDEA_NOT_FOUND: 404,
+  VERSION_NOT_FOUND: 404,
   NOT_FOUND: 404,
   TASK_NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
@@ -1891,6 +1892,33 @@ async function dispatchApi(
             authority: 'user',
           })
           sendJson(req, res, 200, { grant, stats: token.stats() })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'versions') {
+          // ID-04：版本链（新版本在前）
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/versions is not supported`)
+          }
+          requireIdeaStore(setup).require(ideaId)
+          sendJson(req, res, 200, { versions: requireIdeaStore(setup).listVersions(ideaId) })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'rollback') {
+          // ID-04：回滚至任意历史版本（恢复态以新版本入链，可再撤销）
+          if (method !== 'POST') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/rollback is not supported`)
+          }
+          const body = await readJsonObject(req)
+          const version = requirePositiveInt(body, 'version')
+          const note = typeof body.note === 'string' ? body.note : undefined
+          const store = requireIdeaStore(setup)
+          const result = store.rollback(ideaId, version, note)
+          requireMemoryHub(setup).write(ideaId, 'description', {
+            content: `三域回滚至 v${version}（note：${note ?? '—'}），恢复态入链为 v${result.version.version}`,
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, result)
           return
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'publish') {

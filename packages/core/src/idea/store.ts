@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { OpcError } from '../errors.js'
 import { draftThreeDomains, deriveIdeaName } from './three-domains.js'
 import {
+  DOMAIN_LABELS,
   IDEA_MEMORY_STREAMS,
   IDEA_STAGES,
   validateDomains,
@@ -163,10 +164,38 @@ export function scaffoldIdeaHome(ideasRoot: string, idea: Idea): string {
   return home
 }
 
+/** 三域版本快照（ID-04：版本迭代保留历史；回滚以新版本入链，历史 append-only） */
+export interface IdeaVersion {
+  ideaId: string
+  version: number
+  note: string
+  domains: ThreeDomains
+  createdAt: number
+}
+
+interface VersionRow {
+  idea_id: string
+  version: number
+  note: string
+  domains_json: string
+  created_at: number
+}
+
+function rowToVersion(row: VersionRow): IdeaVersion {
+  return {
+    ideaId: row.idea_id,
+    version: row.version,
+    note: row.note,
+    domains: JSON.parse(row.domains_json) as ThreeDomains,
+    createdAt: row.created_at,
+  }
+}
+
 /**
- * 创意存储（SQLite 主库，ideas 表）：
- * - create：文本 → 三域草案（ID-01）+ 可选目录脚手架（ID-03）；
- * - domains/stage 更新同步镜像 meta.json（DSH 侧工具直接可读）。
+ * 创意存储（SQLite 主库，ideas 表 + idea_versions 版本链）：
+ * - create：文本 → 三域草案（ID-01）+ 可选目录脚手架（ID-03）+ 初始版本 v1（ID-04）；
+ * - domains/stage 更新同步镜像 meta.json（DSH 侧工具直接可读）；
+ * - 三域每次迭代自动入链，rollback 以"恢复态作为新版本"入链（历史不可改写）。
  * 目录根缺省时为纯库模式（不落 ideas/ 目录，测试用）。
  */
 export class SqliteIdeaStore {
@@ -193,6 +222,16 @@ export class SqliteIdeaStore {
       )
     `)
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_stage ON ideas (stage, created_at DESC)')
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS idea_versions (
+        idea_id      TEXT NOT NULL,
+        version      INTEGER NOT NULL,
+        note         TEXT NOT NULL,
+        domains_json TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        PRIMARY KEY (idea_id, version)
+      )
+    `)
   }
 
   /** 录入创意：ID-01 自动三域草案；ideasRoot 就绪时同步 ID-03 目录初始化 */
@@ -213,6 +252,7 @@ export class SqliteIdeaStore {
     this.db
       .prepare('INSERT INTO ideas (id, name, stage, domains_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(idea.id, idea.name, idea.stage, JSON.stringify(idea.domains), idea.createdAt, idea.updatedAt)
+    this.recordVersion(idea.id, idea.domains, '初始三域草案')
     if (this.ideasRoot) scaffoldIdeaHome(this.ideasRoot, idea)
     return idea
   }
@@ -245,11 +285,12 @@ export class SqliteIdeaStore {
   }
 
   /**
-   * 三域迭代更新（ID-02：用户在三域间自由切换、反复迭代）：整体替换三域并镜像 meta.json。
+   * 三域迭代更新（ID-02：用户在三域间自由切换、反复迭代）：整体替换三域并镜像 meta.json，
+   * 迭代态自动入版本链（ID-04，note 缺省『三域迭代』）。
    * 同时把本次编辑以 user 权威写入 description 流是调用方（API 层）的职责——
    * store 只管实体一致性与持久化。
    */
-  updateDomains(id: string, domains: ThreeDomains): Idea {
+  updateDomains(id: string, domains: ThreeDomains, note?: string): Idea {
     const current = this.require(id)
     const validated = validateDomains(domains)
     const updatedAt = this.now()
@@ -257,12 +298,13 @@ export class SqliteIdeaStore {
       .prepare('UPDATE ideas SET domains_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(validated), updatedAt, id)
     const updated: Idea = { ...current, domains: validated, updatedAt }
+    this.recordVersion(id, validated, note?.trim() || '三域迭代')
     this.mirrorMeta(updated)
     return updated
   }
 
   /** 单域便捷更新：仅覆盖给定维度，其余保持原样（三域共演化，非线性流程） */
-  updateDomain(id: string, key: DomainKey, detail: { summary?: string; points?: string[] }): Idea {
+  updateDomain(id: string, key: DomainKey, detail: { summary?: string; points?: string[] }, note?: string): Idea {
     const current = this.require(id)
     const merged = { ...current.domains }
     const base = merged[key]
@@ -270,7 +312,60 @@ export class SqliteIdeaStore {
       summary: detail.summary ?? base.summary,
       points: detail.points ?? base.points,
     }
-    return this.updateDomains(id, merged)
+    return this.updateDomains(id, merged, note ?? `三域迭代[${DOMAIN_LABELS[key]}]`)
+  }
+
+  /**
+   * 回滚至历史版本（ID-04 验收：可回滚至任意历史版本）。
+   * 语义：把目标快照的三域整体恢复为当前态，恢复动作本身作为新版本入链
+   * （历史 append-only 不可改写，回滚可再撤销）。版本不存在抛 VERSION_NOT_FOUND。
+   */
+  rollback(id: string, version: number, note?: string): { idea: Idea; version: IdeaVersion } {
+    const rows = this.db
+      .prepare('SELECT idea_id, version, note, domains_json, created_at FROM idea_versions WHERE idea_id = ? AND version = ?')
+      .all(id, version) as unknown as VersionRow[]
+    if (rows.length === 0) {
+      throw new OpcError('VERSION_NOT_FOUND', `idea ${id} has no version ${version}`)
+    }
+    const target = rowToVersion(rows[0])
+    const restored = this.updateDomains(id, target.domains, note?.trim() || `回滚至 v${version}`)
+    return { idea: restored, version: this.requireVersion(id) }
+  }
+
+  /** 版本链（新版本在前） */
+  listVersions(id: string): IdeaVersion[] {
+    this.require(id)
+    const rows = this.db
+      .prepare('SELECT idea_id, version, note, domains_json, created_at FROM idea_versions WHERE idea_id = ? ORDER BY version DESC')
+      .all(id) as unknown as VersionRow[]
+    return rows.map(rowToVersion)
+  }
+
+  /** 追加版本：版本号 = 该创意当前最大版本 + 1 */
+  private recordVersion(ideaId: string, domains: ThreeDomains, note: string): IdeaVersion {
+    const version = this.nextVersion(ideaId)
+    const createdAt = this.now()
+    this.db
+      .prepare('INSERT INTO idea_versions (idea_id, version, note, domains_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(ideaId, version, note, JSON.stringify(domains), createdAt)
+    return { ideaId, version, note, domains, createdAt }
+  }
+
+  private nextVersion(ideaId: string): number {
+    const rows = this.db
+      .prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM idea_versions WHERE idea_id = ?')
+      .all(ideaId) as unknown as Array<{ max_version: number }>
+    return Number(rows[0]?.max_version ?? 0) + 1
+  }
+
+  private requireVersion(ideaId: string): IdeaVersion {
+    const rows = this.db
+      .prepare('SELECT idea_id, version, note, domains_json, created_at FROM idea_versions WHERE idea_id = ? ORDER BY version DESC LIMIT 1')
+      .all(ideaId) as unknown as VersionRow[]
+    if (rows.length === 0) {
+      throw new OpcError('VERSION_NOT_FOUND', `idea ${ideaId} has no versions`)
+    }
+    return rowToVersion(rows[0])
   }
 
   /** 阶段推进（合法性由 M2 opc-lifecycle 状态机校验；store 层只认合法阶段值） */

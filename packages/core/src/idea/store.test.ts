@@ -101,6 +101,51 @@ test('idea store: 阶段推进同步 profile 与 meta（prd2.md 2.5）', () => {
   store.close()
 })
 
+test('idea store: 版本链与回滚（ID-04）——迭代自动入链、恢复态以新版本入链', () => {
+  let clock = 100_000
+  const store = new SqliteIdeaStore(join(dir, 'versions.db'), undefined, () => clock)
+  const idea = store.create({ text: '宠物上门喂养服务' })
+  clock += 1_000
+
+  // v1 = 初始三域草案
+  const versions0 = store.listVersions(idea.id)
+  assert.equal(versions0.length, 1)
+  assert.equal(versions0[0]?.version, 1)
+  assert.equal(versions0[0]?.note, '初始三域草案')
+
+  // 迭代入链：单域更新 note 自动带域名
+  clock += 1_000
+  store.updateDomain(idea.id, 'solution', { summary: '调度平台 v1' })
+  clock += 1_000
+  store.updateDomain(idea.id, 'solution', { summary: '调度平台 v2' }, '自定义迭代说明')
+  const versions1 = store.listVersions(idea.id)
+  assert.deepEqual(versions1.map((v) => v.version), [3, 2, 1])
+  assert.equal(versions1[0]?.note, '自定义迭代说明')
+  assert.equal(versions1[1]?.note, '三域迭代[解决域]')
+
+  // 回滚至 v1：三域恢复，且恢复态以新版本 v4 入链（历史 append-only）
+  clock += 1_000
+  const rolled = store.rollback(idea.id, 1)
+  assert.equal(rolled.version.version, 4)
+  assert.equal(rolled.idea.domains.solution.summary, versions0[0]?.domains.solution.summary)
+  assert.equal(store.listVersions(idea.id).length, 4)
+  assert.equal(store.require(idea.id).domains.solution.summary, versions0[0]?.domains.solution.summary)
+
+  // 回滚可再撤销：回滚到 v3（v2 态）同样成立
+  const rolled2 = store.rollback(idea.id, 3)
+  assert.equal(rolled2.idea.domains.solution.summary, '调度平台 v2')
+  assert.equal(store.listVersions(idea.id).length, 5)
+
+  // 版本不存在 → VERSION_NOT_FOUND（404 语义）
+  assert.throws(
+    () => store.rollback(idea.id, 99),
+    (e: { code?: string }) => e.code === 'VERSION_NOT_FOUND',
+  )
+  // 不存在的创意列版本同样 404
+  assert.throws(() => store.listVersions('idea-none'), /does not exist/)
+  store.close()
+})
+
 test('idea store: list 新建在前 / count / require 404 语义', () => {
   let clock = 10_000
   const store = new SqliteIdeaStore(join(dir, 'list.db'), undefined, () => clock)

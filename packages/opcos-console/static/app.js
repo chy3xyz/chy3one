@@ -371,12 +371,13 @@
     async function openDetail() {
       if (!selectedId) { detailBox.innerHTML = ''; return; }
       await loadInto(detailBox, '加载创意详情…', async () => {
-        const [d, sg, ws, ldg, tk] = await Promise.all([
+        const [d, sg, ws, ldg, tk, ver] = await Promise.all([
           api.get(`/api/ideas/${selectedId}`),
           api.get(`/api/ideas/${selectedId}/mvp/suggestion`).catch(() => null),
           api.get(`/api/ideas/${selectedId}/workspace`).catch(() => null),
           api.get(`/api/ideas/${selectedId}/ledger`).catch(() => null),
           api.get(`/api/ideas/${selectedId}/token`).catch(() => null),
+          api.get(`/api/ideas/${selectedId}/versions`).catch(() => null),
         ]);
         const idea = d.idea;
         const domains = idea.domains || {};
@@ -648,6 +649,34 @@
           collabUser.value = ''; collabText.value = '';
         });
 
+        // 版本链与回滚（ID-04）：三域每次迭代自动入链；回滚以恢复态入新版本，可再撤销
+        const versionsBox = h('div');
+        const renderVersions = versions => {
+          if (!versions || !versions.length) {
+            render(versionsBox, ui.empty('还没有版本记录'));
+            return;
+          }
+          const rows = versions.map(v => {
+            const lastCell = v.version === versions[0].version
+              ? ui.badge('当前', 'ok')
+              : (() => {
+                  const btn = h('button', { class: 'btn btn-sm', type: 'button', text: '回滚到此版' });
+                  btn.addEventListener('click', async () => {
+                    if (!window.confirm(`回滚到 v${v.version}？当前三域会先存为新版本（可再撤销）。`)) return;
+                    try {
+                      const res = await api.post(`/api/ideas/${idea.id}/rollback`, { version: v.version });
+                      toast.ok(`已回滚至 v${v.version}，恢复态入链为 v${res.version.version}`);
+                      await Promise.all([openDetail(), loadList()]);
+                    } catch { /* api 层已 toast */ }
+                  });
+                  return btn;
+                })();
+            return [`v${v.version}`, v.note, fmtTime(v.createdAt), lastCell];
+          });
+          render(versionsBox, ui.table(['版本', '说明', '时间', ''], rows));
+        };
+        renderVersions(ver && ver.versions);
+
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
@@ -660,6 +689,9 @@
               h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
             mvpBox,
             ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
+          ui.sectionCard('三域版本链（ID-04）',
+            h('p', { class: 'muted small', style: 'margin:0 0 6px', text: '三域每次迭代自动入链；回滚会把当前三域先存为新版本，可随时再撤销。' }),
+            versionsBox),
           ui.sectionCard('GEO 监测（阶段三）',
             ui.toolbar(ui.actions(geoBtn),
               h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),

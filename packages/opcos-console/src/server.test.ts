@@ -948,6 +948,48 @@ test('console: 产品资产（M4）——.skillpkg 创意归属、订单分成�
   assert.equal(ledger3.body.ledger.assets.tokens.distributed, 40_000)
 })
 
+test('console: 创意版本链与回滚（ID-04）——迭代入链/回滚以新版本入链/404', async (t) => {
+  const { url } = await launch(t)
+  const idea = (await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: '版本链测试创意' })).body.idea
+
+  // v1 初始草案
+  const v0 = await getJson<{ versions: Array<{ version: number; note: string; domains: ThreeDomainsOf }> }>(
+    `${url}api/ideas/${idea.id}/versions`,
+  )
+  assert.equal(v0.body.versions.length, 1)
+  assert.equal(v0.body.versions[0]?.version, 1)
+  assert.equal(v0.body.versions[0]?.note, '初始三域草案')
+
+  // 迭代 v2 → 回滚 v1 → 恢复态入链 v3
+  await patchJson(`${url}api/ideas/${idea.id}/domains`, {
+    domain: 'solution', summary: '迭代后的方案', points: ['要点甲'],
+  })
+  const rolled = await postJson<{ idea: IdeaEntity; version: { version: number } }>(
+    `${url}api/ideas/${idea.id}/rollback`, { version: 1 },
+  )
+  assert.equal(rolled.status, 200)
+  assert.equal(rolled.body.version.version, 3, '恢复态应以新版本 v3 入链')
+  assert.notEqual(rolled.body.idea.domains?.solution.summary, '迭代后的方案')
+
+  const v2 = await getJson<{ versions: Array<{ version: number }> }>(`${url}api/ideas/${idea.id}/versions`)
+  assert.deepEqual(v2.body.versions.map((v) => v.version), [3, 2, 1])
+
+  // 回滚描述写入 description 流正本
+  const entries = await getJson<{ entries: Array<{ content: string }> }>(
+    `${url}api/ideas/${idea.id}/entries?q=${encodeURIComponent('三域回滚')}`,
+  )
+  assert.equal(entries.body.entries.length, 1)
+
+  // 版本不存在 → 404 VERSION_NOT_FOUND；GET versions 不存在的创意 → 404
+  const missing = await postJson<{ error: { code: string } }>(`${url}api/ideas/${idea.id}/rollback`, { version: 99 })
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error.code, 'VERSION_NOT_FOUND')
+  const none = await getJson<{ error: { code: string } }>(`${url}api/versions-x/${idea.id}`)
+  assert.equal(none.status, 404)
+})
+
+type ThreeDomainsOf = IdeaEntity['domains']
+
 test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注通知/排行/协同/阶段过滤/定价/安装到创意', async (t) => {
   let getService: ((name: string) => unknown) | undefined
   const { url } = await launch(t, {
