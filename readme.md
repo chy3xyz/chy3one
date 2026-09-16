@@ -11,17 +11,19 @@
      └──────────── 记忆资产（人设/爆款模式/教训）全程沉淀，反哺下一轮创意 ────────────┘
 ```
 
-- **创意**：控制台一键录入，自动进入选题记忆，驱动下一条内容
-- **作品**：内容引擎发布图文；重复工作流被本能系统自动蒸馏为可售 Skill（Ed25519 签名）
-- **收入**：市场订单（85/15 分成、Stripe 测试通道）+ 数字员工 RaaS 计费（自主解决 ¥2.5/次）
-- **资产**：全部过程沉淀为七类记忆资产（人设/爆款模式/教训…），越用越准
+- **创意**：控制台一键录入，自动生成三域草案（问题域/解决域/时空域）、初始化独立记忆体与子操作系统，沿 描述→产品→运营→资产 四阶段生命周期推进
+- **作品**：内容引擎按创意人设出稿（人设隔离），五平台矩阵（公众号/小红书/抖音/Twitter/B站）适配分发；重复工作流被本能系统自动蒸馏为可售 Skill（Ed25519 签名 .skillpkg）
+- **收入**：市场订单（85/15 分成、免费/一次性/订阅三种定价、Stripe 测试通道）+ 数字员工 RaaS 计费（自主解决 ¥2.5/次），分成自动入账创意资产账本
+- **资产**：五类资产账本（Skill 沉淀/Meme Token 积分/财务/用户/运营数据）+ 七类记忆资产，全程沉淀反哺创意
+- **GEO**：豆包/DeepSeek/ChatGPT/文心 品牌可见性监测（模拟口径），E-E-A-T 检查与 Schema 标记提升被生成式引擎引用概率
+- **市场**：创意市场（检索/关注/互补相似关联发现/协同贡献发 Token/三口径排行）
 
 ## 快速开始
 
 ```bash
 npm install
-npm test        # 构建 + 全部测试（264 项）
-npm run demo    # 整体系统全链路 Demo（真实 cordis，11 步业务闭环）
+npm test        # 构建 + 全部测试（341 项）
+npm run demo    # 整体系统全链路 Demo（真实 cordis，12 步业务闭环）
 npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 ```
 
@@ -33,8 +35,8 @@ npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 
 ## 结构
 
-- packages/core — 领域核心（零外部依赖）：双记忆、黑板、任务板、Skill 蒸馏/打包、市场索引、支付/订单/分成、RaaS 计费/回补、租户隔离、SQLite 存储、内容流水线
+- packages/core — 领域核心（零外部依赖）：创意实体/三域/生命周期、记忆体（FTS5 检索+挂载隔离）、黑板、任务板、Skill 蒸馏/打包、Skill/创意双市场、支付/订单/分成、RaaS 计费/回补、租户隔离、SQLite 存储、内容流水线（多平台+GEO）、GEO 监测、资产账本、Token 积分
 - packages/dsh-adapter — DSH/Cordis 唯一接触面（升级隔离层 + compat 门禁 + TelemetryBus）
-- packages/dsh-plugins/* — 8 个插件：billing / memory / blackboard / skill-forge / team / marketplace / content / console
+- packages/dsh-plugins/* — 10 个插件：billing / memory / blackboard / skill-forge / team / marketplace / content / console / lifecycle / geo-monitor
 - packages/opcos-bundle — 可安装 Bundle（cordis.patch.yml + 启动健康握手 + 全链路 Demo）
-- packages/opcos-console — 创意变现控制台（11 面板：漏斗总览/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）
+- packages/opcos-console — 创意变现控制台（13 面板：漏斗总览/我的创意/创意市场/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）

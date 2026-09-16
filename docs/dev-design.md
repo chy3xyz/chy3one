@@ -226,3 +226,72 @@ ctx.inject(["webServer"], (webCtx) => {
 - 前端渲染串行化：面板渲染走 Promise 链，杜绝并发渲染的过期覆盖（首帧竞态事故修复，2026-09-15）。
 
 > 注：M4 表内数字为各里程碑收口时点值；当前全量测试数以 `npm test` 实时输出为准（本评估时点为 174）。
+
+## 10. PRD v2.0（CreativeOS）升级章节（DEV-OPCOS-2026-002，2026-09-16）
+
+> 对应产品文档 docs/prd2.md（PRD-OPCOS-2026-002）：产品单元从 v1 的 Agent/工具收敛为**创意（Idea）一等公民**——四阶段生命周期（描述→产品→运营→资产）、独立记忆体、子操作系统、双市场。本章记录落地形态与 v1 章节的增量契约。
+
+### 10.1 新增核心模块（packages/core）
+
+| 模块 | 职责 | 对应 PRD 需求 |
+|---|---|---|
+| `idea/` | Idea 实体（四阶段状态机数据层）+ 三域框架（每域≥3 引导问题）+ 规则策略三域草案 + SqliteIdeaStore（ideas 表 + `$DSH_HOME/ideas/<id>/` 目录脚手架：memory-body 七 JSONL 正本、assets/ledger.json、assets/token.json、profile/cordis.patch.yml、meta.json 镜像） | ID-01/02/03、2.4、2.5 |
+| `memory/body-index.ts` + `memory-body.ts` | 记忆体检索索引（SQLite FTS5 **trigram**：中英文≥3 字任意子串命中；FTS5 不可用自动回退 LIKE；查询必带 ideaIds 过滤=挂载隔离）+ MemoryBodyHub（JSONL append-only 正本 + 索引镜像 + 会话级 mount/unmount） | 2.4、8.3、10 |
+| `memory/body-bridge.ts` | 创意记忆体 ↔ MemoryStore 桥（v1 七类 category → 记忆体流映射），供内容流水线按创意隔离人设 | CO-02 |
+| `lifecycle/` | IdeaLifecycle 线性单向状态机（description→product→operation→asset）：迁移写 decisions 正本（authority=model）+ profile 的 stage 行重写；非法迁移 `STAGE_TRANSITION_INVALID` | 3.4、4.5 |
+| `mvp/` | planMvp（三域→功能清单/技术栈/三段计划，模板策略）+ suggestGoNoGo（确定性规则：≥2 条且均值≥3.5 → go） | IP-01/04 |
+| `workspace/` | IdeaWorkspace 路径守卫：绝对路径/`..`/盘符逃逸一律 `PERMISSION_DENIED`，读写根限定 `ideas/<id>/workspace/` | IP-02、3.3 |
+| `content/platforms.ts` | 五平台矩阵（wechat/xiaohongshu/douyin/twitter/bilibili）Mock 适配器 + MultiPlatformDispatcher（逐平台适配耗时、单平台失败隔离） | CO-03 |
+| `content/geo.ts` | E-E-A-T 四维启发式检查（advisory：扣分不改 pass）+ Schema JSON-LD 生成 + 结构化选题加权（FAQ/指南/对比 +0.3） | 4.3 策略一/二/三 |
+| `geo/` | GeoMonitor（探测→visibility_drop≥0.2 告警→SQLite 快照→onSnapshot 回调写记忆体 analytics 流）+ MockGeoProvider（确定性伪随机，GeoProvider 接口可换真实/LLM 估值） | 4.4 |
+| `asset/` | IdeaLedger：`assets/ledger.json` 五类资产账本（prd2.md 5.5 同形；金额一律"分"） | 5.5 |
+| `token/` | TokenLedger：Meme Token 积分账本（**不上链**，R-02 合规定位；45/25/20/10 分配模型；角色配额+总量双重约束 `TOKEN_ALLOCATION_EXCEEDED`；distribution.json append 流水） | 5.4、6.5 |
+| `idea-market/` | SqliteIdeaMarket：公开摘要发布（+summary.json 文件镜像）、FTS5 检索、关注+阶段变更通知、关联发现（三域 bigram Jaccard + 阶段互补 → complementary/similar）、协同贡献记录（6.4 六角色权重）、三口径排行 | IM-01~06、ID-05 |
+| `bench/prd2-nfr.test.ts` | NFR 基线：1000 创意目录、挂载切换 <500ms（实测 ~30ms）、1000 摘要检索 <500ms（实测 ~110ms） | 10 |
+
+### 10.2 新增插件（packages/dsh-plugins）
+
+| 插件 | 服务 | 说明 |
+|---|---|---|
+| `opc-lifecycle` | `opc.lifecycle` | 生命周期编排的 DSH 服务形态；与控制台共享 ideas.db / ideas/ 目录 / memory-bodies.db（WAL 多连接）。PRD `creativeos/lifecycle-manager` 的物理形态 |
+| `opc-geo-monitor` | `opc.geo` | GEO 监测服务（writeToMemory 接线：快照写 analytics 流）。PRD `creativeos/geo-monitor` 的物理形态 |
+
+**命名约定说明**：PRD 8.2 的 `creativeos/*` 为逻辑名，物理插件沿用仓库 `opc-*` 约定（dev-design 第 4 章）。`creativeos/idea-marketplace` / `skill-marketplace` 未单独成插件——市场索引由控制台本地构造（SqliteIdeaMarket/SqliteSkillIndex），与 skills.db 同模式；DSH 侧工具经 summary.json/ledger.json 文件镜像访问。
+
+### 10.3 控制台增量（opcos-console）
+
+- **新面板**：我的创意（列表/阶段推进/三域编辑器/记忆体检索写入/挂载开关/MVP 方案与验证/GEO 监测/资产与 Token/市场发布与协同）、创意市场（搜索/排行/关注/通知）。总览漏斗段 1 切换为 Idea 实体口径。
+- **新端点**：`/api/ideas/:id`（详情/domains/transition/mvp/*/workspace/entries/ledger/token/geo/publish/collab）、`/api/memory-bodies(+mount)`、`/api/guiding-questions`、`/api/market/*`、`/api/notifications`。创意库未配置时 `/api/ideas` 自动降级 v1 topic 行为。
+- **资产联动**：orders/pay 对作者为创意（authorId=创意ID）的订单自动把 85% 创作者分成入账该创意 `skill_revenue`；geo 刷新联动账本 analytics；协同按角色权重（默认 权重×100）发放 Token。
+- **签名同源**：createMarketCatalog 返回目录级 Ed25519 密钥（内存持有私钥），publish-draft 用其签名，修复"新签名包无法通过目录公钥验签安装"的断层。
+- **插件清单**：standalone 启动装载 9 插件（8 个 v1 插件 + opc-lifecycle + opc-geo-monitor；opc-console 自身 hosted/standalone 二态不在此列）。
+
+### 10.4 需求编号 ↔ 测试映射（PRD v2.0）
+
+| 需求 | 测试 |
+|---|---|
+| ID-01 三域草案 | core `idea/store.test.ts`、`three-domains.test.ts` |
+| ID-02 三域引导/迭代 | core `idea/store.test.ts`、console `server.test.ts`（创意实体端点） |
+| ID-03 创意初始化 | core `idea/store.test.ts`（脚手架+幂等） |
+| 记忆体/挂载/FTS5（8.3） | core `memory/body-index.test.ts`、`memory-body.test.ts` |
+| 子OS profile（2.5） | core `idea/store.test.ts`（阶段同步重写） |
+| 生命周期（3.4/4.5） | core `lifecycle/lifecycle.test.ts`、plugin `opc-lifecycle/index.test.ts` |
+| IP-01/04 MVP | core `mvp/planner.test.ts`、console M2 集成 |
+| IP-02 工作区隔离 | core `workspace/workspace.test.ts`、console M2 集成（越界 403） |
+| CO-02 人设隔离 | core `memory/body-bridge.test.ts`（端到端流水线） |
+| CO-03 多平台 | core `content/platforms.test.ts` |
+| 4.3 GEO 行销 | core `content/geo.test.ts` |
+| 4.4 GEO 监测 | core `geo/monitor.test.ts`、plugin `opc-geo-monitor/index.test.ts` |
+| 5.4/6.5 Token | core `token/points.test.ts` |
+| 5.5 账本 | core `asset/ledger.test.ts` |
+| 7.5 .skillpkg | core `skill/packager.skillpkg.test.ts` |
+| IM-01~06 创意市场 | core `idea-market/market.test.ts`、console M5 集成 |
+| SM-01/02/04 技能市场 v2 | console M5 集成 |
+| 10 NFR | core `bench/prd2-nfr.test.ts` |
+
+### 10.5 偏差与口径说明
+
+- **Meme Token 为积分账本**（R-02 自身缓解措施），不接链；数据形态对齐 6.5，接口预留 chain provider 扩展位。
+- **GEO 监测数据为模拟口径**（主流 AI 平台无公开可见性 API），MockProvider 确定性伪随机，UI/API 均显式标注 `simulated`；GeoProvider 接口可替换 LLM 估值/真实采集。
+- **PRD 9.1 统计数字内部不一致**（P0×18 vs 模块表加总 24），执行以模块表 P0 编号为准。
+- 记忆体检索隔离采用"单库 + idea_id 过滤列"而非每创意独立 .db；规模验证（bench）达标后如需物理隔离再演进。

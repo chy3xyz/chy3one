@@ -42,6 +42,14 @@ import { plugin as skillForgePlugin, type SkillForgeService } from '../../dsh-pl
 import { plugin as teamPlugin, type TeamPlan, type TeamService } from '../../dsh-plugins/opc-team/src/index.js'
 import {
   SqliteSkillIndex,
+  SqliteIdeaStore,
+  SqliteIdeaMarket,
+  MemoryBodyHub,
+  MemoryBodyIndex,
+  IdeaLifecycle,
+  IdeaLedger,
+  TokenLedger,
+  planMvp,
   type BillingEngine,
   type BlackboardEntry,
   type BlackboardScope,
@@ -140,6 +148,16 @@ export interface DemoResults {
   billing?: { taskId: string; amount: number; totalRevenue: number }
   memory?: { writtenId: string; category: string; hits: number }
   telemetryTotals?: { totalEvents: number }
+  /** prd2.md 创意生命周期全链（h2 步） */
+  ideaLifecycle?: {
+    ideaId: string
+    stage: string
+    domainsDrafted: boolean
+    decisionsRecords: number
+    financeTotalCents: number
+    tokenDistributed: number
+    marketListed: boolean
+  }
 }
 
 /** 全链路 Demo 结构化报告（demo.test.ts 断言的对象） */
@@ -462,6 +480,58 @@ export async function main(): Promise<DemoReport> {
       report.results.memory = { writtenId: entry.id, category: entry.category, hits: hits.length }
       assert.equal(hits.length, 1)
       assert.equal(hits[0]?.id, entry.id)
+    })
+
+    /* h2. CreativeOS 创意生命周期全链（prd2.md）：录入→三域→MVP→迁移→账本→市场 */
+    await runStep(steps, 'idea: 创意录入→三域草案→MVP→阶段迁移→资产账本→市场发布', () => {
+      const ideasRoot = join(dir, 'demo-ideas')
+      const store = new SqliteIdeaStore(join(dir, 'demo-ideas.db'), ideasRoot)
+      const idea = store.create({ text: '跨境电商卖家选品难。打算做一个AI选品工具，提供选品数据。面向出海市场。' })
+      assert.match(idea.id, /^idea-[0-9a-f]{8}$/)
+      assert.ok(idea.domains.solution.summary.length > 0, '录入应生成三域草案')
+
+      const home = store.homeDir(idea.id)!
+      const hub = new MemoryBodyHub(ideasRoot, new MemoryBodyIndex(join(dir, 'demo-bodies.db')))
+      const lifecycle = new IdeaLifecycle(store, hub)
+      const transitioned = lifecycle.transition(idea.id, 'product', 'demo：MVP 验证过线')
+      assert.equal(transitioned.idea.stage, 'product')
+      assert.equal(hub.readStream(idea.id, 'decisions').length, 1, '迁移决策正本应写入 decisions 流')
+
+      const plan = planMvp(idea.id, transitioned.idea.domains)
+      assert.ok(plan.features.length > 0 && plan.milestones.length === 3)
+
+      const ledger = IdeaLedger.forIdeaHome(home, idea.id)
+      ledger.recordRevenue('skill', 842)
+      assert.equal(ledger.read().assets.finance.total, 842)
+
+      const tokenLedger = new TokenLedger(home, idea.id)
+      const grant = tokenLedger.issue('demo-collaborator', 'collaborator', 2_000, 'MVP 代码贡献')
+      assert.equal(grant.amount, 2_000)
+
+      const market = new SqliteIdeaMarket(join(dir, 'demo-market.db'))
+      const summary = {
+        ideaId: idea.id, name: idea.name, stage: transitioned.idea.stage,
+        problemSummary: idea.domains.problem.summary, solutionSummary: idea.domains.solution.summary,
+        spacetimeSummary: idea.domains.spacetime.summary,
+        financeTotalCents: ledger.read().assets.finance.total,
+        geoVisibility: ledger.read().assets.analytics.geo_visibility,
+        publishedAt: Date.now(), followers: 0,
+      }
+      market.publish(summary)
+      assert.equal(market.search({ keyword: '选品' }).length, 1)
+      assert.equal(market.follow(idea.id, 'demo-follower').followers, 1)
+
+      report.results.ideaLifecycle = {
+        ideaId: idea.id,
+        stage: transitioned.idea.stage,
+        domainsDrafted: true,
+        decisionsRecords: hub.readStream(idea.id, 'decisions').length,
+        financeTotalCents: ledger.read().assets.finance.total,
+        tokenDistributed: tokenLedger.stats().distributed,
+        marketListed: true,
+      }
+      market.close()
+      store.close()
     })
 
     /* i. 埋点汇总：报告末尾列出各总线收到的事件 type 计数 */
