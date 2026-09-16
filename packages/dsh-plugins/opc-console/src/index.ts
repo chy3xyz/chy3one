@@ -29,7 +29,7 @@ import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
 
 import { defineOpcPlugin, type OpcContext, type TelemetryEvent } from '../../../dsh-adapter/src/index.js'
-import { MemoryBodyHub, MemoryBodyIndex, SqliteIdeaMarket, SqliteIdeaStore } from '../../../core/src/index.js'
+import { MemoryBodyHub, MemoryBodyIndex, SqliteIdeaMarket, SqliteIdeaStore, SubscriptionStore } from '../../../core/src/index.js'
 import {
   createApiSetup,
   createMarketCatalog,
@@ -154,9 +154,11 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
   const ideaMarket = new SqliteIdeaMarket(join(dataDir, 'ideas-market.db'), {
     marketRoot: join(dataDir, 'ideas-market'),
   })
+  const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
 
   // 关停（LIFO）：市场索引最后关——先撤路由/HTTP server，再退订埋点，最后 close 索引
   ctx.onDispose(() => index.close())
+  ctx.onDispose(() => subscriptions.close())
   ctx.onDispose(() => ideaMarket.close())
   ctx.onDispose(() => bodyIndex.close())
   ctx.onDispose(() => ideaStore.close())
@@ -178,6 +180,7 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
     memoryHub,
     ideaMarket,
     signingKeys,
+    subscriptions,
     // handshake 缺省 → /api/health 按服务可用性实时探测（probeHandshake）
   })
 }

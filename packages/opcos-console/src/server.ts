@@ -24,7 +24,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import type { TelemetryEvent } from '../../dsh-adapter/src/index.js'
-import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaMarket, SqliteIdeaStore } from '../../core/src/index.js'
+import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaMarket, SqliteIdeaStore, SubscriptionStore } from '../../core/src/index.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -150,6 +150,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const ideaMarket = new SqliteIdeaMarket(join(dataDir, 'ideas-market.db'), {
     marketRoot: join(dataDir, 'ideas-market'),
   })
+  const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
 
   const deps: ConsoleDeps = {
     getService: (name) => ctx.get(name),
@@ -166,6 +167,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     memoryHub,
     ideaMarket,
     signingKeys,
+    subscriptions,
   }
   const setup = createApiSetup(deps)
 
@@ -197,6 +199,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     ideaStore.close()
     bodyIndex.close()
     ideaMarket.close()
+    subscriptions.close()
     index.close()
   }
 

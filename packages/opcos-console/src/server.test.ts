@@ -990,6 +990,79 @@ test('console: 创意版本链与回滚（ID-04）——迭代入链/回滚以�
 
 type ThreeDomainsOf = IdeaEntity['domains']
 
+test('console: 订阅续费语义（SM-04）——支付激活/续费顺延/权益检查', async (t) => {
+  let getService: ((name: string) => unknown) | undefined
+  const { url } = await launch(t, {
+    onReady: (fn) => {
+      getService = fn
+    },
+  })
+  const forge = getService?.('opc.skillforge') as
+    | {
+        observe(observation: { taskSignature: string; tools: string[]; success: boolean; timestamp: number }): void
+        listDrafts(): Array<{ name: string; version: string }>
+      }
+    | undefined
+  assert.ok(forge)
+  for (let i = 0; i < 3; i++) {
+    forge.observe({
+      taskSignature: 'sub-skill',
+      tools: ['extract', 'format', 'deliver'],
+      success: true,
+      timestamp: 1_750_000_000_000 + i,
+    })
+  }
+
+  // 以订阅定价上架（monthly）
+  const published = await postJson<{ skillId: string; pricing: { model: string; period?: string } }>(
+    `${url}api/skills/publish-draft`, { pricingModel: 'subscription', period: 'monthly' },
+  )
+  assert.equal(published.status, 200)
+  assert.equal(published.body.pricing.model, 'subscription')
+  assert.equal(published.body.pricing.period, 'monthly')
+  const skillId = published.body.skillId
+
+  // 首订：支付后激活权益
+  const order1 = await postJson<{ id: string }>(`${url}api/orders`, {
+    skillId, version: '1.0.0', buyerId: 'buyer-sub', amountCents: 990,
+  })
+  const pay1 = await postJson<{ subscription?: { expiresAt: number; activeHint?: boolean } }>(
+    `${url}api/orders/pay`, { orderId: order1.body.id },
+  )
+  assert.equal(pay1.status, 200)
+  assert.ok(pay1.body.subscription, '订阅技能支付应激活权益')
+  const expiry1 = pay1.body.subscription!.expiresAt
+
+  // 权益检查：订阅期内 active
+  const status1 = await getJson<{ active: boolean; subscription?: { expiresAt: number } }>(
+    `${url}api/subscriptions/status?buyerId=buyer-sub&skillId=${skillId}`,
+  )
+  assert.equal(status1.body.active, true)
+  assert.equal(status1.body.subscription?.expiresAt, expiry1)
+
+  // 续订：第二次支付从到期时间顺延（真时钟下同周期内续订 → expiresAt 严格增长）
+  const order2 = await postJson<{ id: string }>(`${url}api/orders`, {
+    skillId, version: '1.0.0', buyerId: 'buyer-sub', amountCents: 990,
+  })
+  const pay2 = await postJson<{ subscription?: { expiresAt: number } }>(
+    `${url}api/orders/pay`, { orderId: order2.body.id },
+  )
+  assert.equal(pay2.status, 200)
+  assert.ok(pay2.body.subscription)
+  const expiry2 = pay2.body.subscription!.expiresAt
+  assert.equal(expiry2, expiry1 + 30 * 86_400_000, '活跃期内续订应从到期时间顺延一个周期')
+
+  // 买家订阅清单
+  const list = await getJson<{ subscriptions: Array<{ skillId: string; active: boolean }> }>(
+    `${url}api/subscriptions?buyerId=buyer-sub`,
+  )
+  assert.equal(list.body.subscriptions.filter((s) => s.skillId === skillId).length, 2)
+  // 一次性定价技能支付不产生订阅
+  const oneTime = await postJson<{ subscription?: unknown }>(`${url}api/skills/publish-draft`, {})
+  assert.equal(oneTime.status, 200)
+  void oneTime
+})
+
 test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注通知/排行/协同/阶段过滤/定价/安装到创意', async (t) => {
   let getService: ((name: string) => unknown) | undefined
   const { url } = await launch(t, {

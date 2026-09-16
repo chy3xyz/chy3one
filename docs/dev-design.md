@@ -265,6 +265,7 @@ ctx.inject(["webServer"], (webCtx) => {
 - **资产联动**：orders/pay 对作者为创意（authorId=创意ID）的订单自动把 85% 创作者分成入账该创意 `skill_revenue`；geo 刷新联动账本 analytics；协同按角色权重（默认 权重×100）发放 Token。
 - **签名同源**：createMarketCatalog 返回目录级 Ed25519 密钥（内存持有私钥），publish-draft 用其签名，修复"新签名包无法通过目录公钥验签安装"的断层。
 - **插件清单**：standalone 启动装载 9 插件（8 个 v1 插件 + opc-lifecycle + opc-geo-monitor；opc-console 自身 hosted/standalone 二态不在此列）。
+- **GEO 7×24 调度**：opc-geo-monitor `refreshIntervalMs`（默认 5min，0 关闭）周期探测全部创意，防重叠/单创意失败不阻断；订阅支付自动激活权益（活跃期续订从到期时间顺延）。
 
 ### 10.4 需求编号 ↔ 测试映射（PRD v2.0）
 
@@ -273,6 +274,7 @@ ctx.inject(["webServer"], (webCtx) => {
 | ID-01 三域草案 | core `idea/store.test.ts`、`three-domains.test.ts` |
 | ID-02 三域引导/迭代 | core `idea/store.test.ts`、console `server.test.ts`（创意实体端点） |
 | ID-03 创意初始化 | core `idea/store.test.ts`（脚手架+幂等） |
+| ID-04 版本链/回滚 | core `idea/store.test.ts`（版本链与回滚）、console（versions/rollback 端点集成） |
 | 记忆体/挂载/FTS5（8.3） | core `memory/body-index.test.ts`、`memory-body.test.ts` |
 | 子OS profile（2.5） | core `idea/store.test.ts`（阶段同步重写） |
 | 生命周期（3.4/4.5） | core `lifecycle/lifecycle.test.ts`、plugin `opc-lifecycle/index.test.ts` |
@@ -286,7 +288,10 @@ ctx.inject(["webServer"], (webCtx) => {
 | 5.5 账本 | core `asset/ledger.test.ts` |
 | 7.5 .skillpkg | core `skill/packager.skillpkg.test.ts` |
 | IM-01~06 创意市场 | core `idea-market/market.test.ts`、console M5 集成 |
+| IM-03 关联准确率 ≥70% | core `idea-market/relations-accuracy.test.ts`（50 组标注评测集，实测 100%） |
 | SM-01/02/04 技能市场 v2 | console M5 集成 |
+| SM-04 订阅续费语义 | core `marketplace/subscriptions.test.ts`（激活/顺延/懒到期）、console 集成（支付激活+权益检查） |
+| 4.4 7×24 调度 | plugin `opc-geo-monitor/index.test.ts`（周期自动探测/dispose 停表/interval=0 关闭） |
 | 10 NFR | core `bench/prd2-nfr.test.ts` |
 
 ### 10.5 偏差与口径说明

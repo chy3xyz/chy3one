@@ -26,6 +26,8 @@ import {
   IdeaWorkspace,
   IdeaLedger,
   TokenLedger,
+  SubscriptionStore,
+  requirePeriod,
   TOKEN_ROLES,
   TOKEN_ROLE_LABELS,
   COLLAB_ROLES,
@@ -418,6 +420,8 @@ export interface ConsoleDeps {
   memoryHub?: MemoryBodyHub
   /** 创意市场索引（可选：市场/关注/关联/排行端点依赖；缺省时相关端点 503） */
   ideaMarket?: SqliteIdeaMarket
+  /** 订阅权益存储（可选：订阅激活与权益查询端点依赖；缺省时订阅支付不激活权益） */
+  subscriptions?: SubscriptionStore
   /** 目录级签名密钥（可选：publish-draft 用它签名新包，保证验签公钥同源） */
   signingKeys?: Ed25519KeyPair
 }
@@ -444,6 +448,8 @@ export interface ConsoleSetup {
   readonly memoryHub?: MemoryBodyHub
   /** 创意市场索引（缺省 undefined：市场端点降级） */
   readonly ideaMarket?: SqliteIdeaMarket
+  /** 订阅权益存储（缺省 undefined：订阅支付不激活权益） */
+  readonly subscriptions?: SubscriptionStore
   /** 目录级签名密钥（publish-draft 签名新包用；缺省时每次生成独立密钥） */
   readonly signingKeys?: Ed25519KeyPair
 }
@@ -482,6 +488,7 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
     memoryHub: deps.memoryHub,
     ideaMarket: deps.ideaMarket,
     signingKeys: deps.signingKeys,
+    subscriptions: deps.subscriptions,
   }
 }
 
@@ -647,6 +654,14 @@ function requireMemoryHub(setup: ConsoleSetup): MemoryBodyHub {
     throw new OpcError('SERVICE_UNAVAILABLE', 'memory hub is not configured in console deps')
   }
   return setup.memoryHub
+}
+
+/** 订阅权益存储必取 */
+function requireSubscriptions(setup: ConsoleSetup): SubscriptionStore {
+  if (!setup.subscriptions) {
+    throw new OpcError('SERVICE_UNAVAILABLE', 'subscription store is not configured in console deps')
+  }
+  return setup.subscriptions
 }
 
 /** 创意市场索引必取 */
@@ -970,6 +985,8 @@ const API_PATHS = new Set([
   '/api/market/ideas',
   '/api/market/rankings',
   '/api/notifications',
+  '/api/subscriptions',
+  '/api/subscriptions/status',
   '/api/funnel',
   '/api/overview',
 ])
@@ -1309,7 +1326,47 @@ async function dispatchApi(
           creditedIdeaId = authorId
         }
       }
-      sendJson(req, res, 200, { order, split, ...(creditedIdeaId ? { creditedIdeaId } : {}) })
+      // SM-04 订阅语义：订阅技能支付成功 → 激活/顺延一个周期权益
+      let subscription: unknown
+      if (setup.skillsIndex.getMetadata(order.skillId, 'pricing_model') === 'subscription') {
+        const period = requirePeriod(setup.skillsIndex.getMetadata(order.skillId, 'period') ?? 'monthly')
+        subscription = setup.subscriptions?.activate({
+          skillId: order.skillId,
+          version: order.version,
+          buyerId: order.buyerId,
+          period,
+          orderId: order.id,
+        })
+      }
+      sendJson(req, res, 200, {
+        order,
+        split,
+        ...(creditedIdeaId ? { creditedIdeaId } : {}),
+        ...(subscription ? { subscription } : {}),
+      })
+      return
+    }
+
+    case 'GET /api/subscriptions': {
+      // SM-04：买家订阅清单（懒判定 active）
+      const subscriptions = requireSubscriptions(setup)
+      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      if (buyerId === undefined) {
+        throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
+      }
+      sendJson(req, res, 200, { subscriptions: subscriptions.listByBuyer(buyerId) })
+      return
+    }
+
+    case 'GET /api/subscriptions/status': {
+      // SM-04：Agent 调用前的权益检查（active = 在订阅期内）
+      const subscriptions = requireSubscriptions(setup)
+      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      const skillId = nonEmptyParam(url.searchParams.get('skillId'))
+      if (buyerId === undefined || skillId === undefined) {
+        throw new OpcError('VALIDATION_ERROR', 'query parameters buyerId and skillId are required')
+      }
+      sendJson(req, res, 200, { buyerId, skillId, ...subscriptions.statusOf(buyerId, skillId) })
       return
     }
 
