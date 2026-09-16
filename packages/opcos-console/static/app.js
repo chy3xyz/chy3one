@@ -997,7 +997,7 @@
       }
     });
     render(box,
-      ui.pageTitle('AI 团队', '说一句目标，团队替你把活干了'),
+      ui.pageTitle('AI 组队', '说一句目标，AI 团队替你把活干了'),
       ui.sectionCard(null,
         ui.toolbar(ui.grow(ui.field('创业目标', goalInput)), ui.actions(submitBtn)),
         h('p', { class: 'muted', text: '解析失败时将降级为行业模板选择（跨境电商创业团队、独立开发者团队等）。' })),

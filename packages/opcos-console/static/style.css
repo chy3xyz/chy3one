@@ -788,3 +788,25 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
 .bar { width: 100%; max-width: 30px; background: linear-gradient(180deg, #38bdf8, #0284c7); border-radius: 4px 4px 0 0; }
 .bar-value { font-size: 10px; opacity: .85; }
 .bar-label { font-size: 10px; opacity: .65; white-space: nowrap; }
+
+/* 侧边栏功能分组标题 */
+.nav-group {
+  padding: 14px 14px 4px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--opc-muted);
+  opacity: 0.72;
+  user-select: none;
+}
+.nav-group:first-child { padding-top: 2px; }
+
+@media (max-width: 820px) {
+  /* 移动端横向导航下分组标题弱化为分隔点 */
+  .nav-group {
+    flex: 0 0 auto;
+    align-self: center;
+    padding: 0 2px;
+    font-size: 10px;
+    opacity: 0.5;
+  }
+}
