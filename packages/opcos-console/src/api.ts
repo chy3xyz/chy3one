@@ -20,11 +20,17 @@ import {
   SqliteIdeaStore,
   SqliteSkillIndex,
   MemoryBodyHub,
+  IdeaLifecycle,
+  IdeaWorkspace,
   installFromMarket,
+  planMvp,
+  suggestGoNoGo,
+  workspacePathFor,
   GUIDING_QUESTIONS,
   DOMAIN_KEYS,
   DOMAIN_LABELS,
   IDEA_MEMORY_STREAMS,
+  IDEA_STAGES,
   validateDomains,
   type BillingRecord,
   type BlackboardEntry,
@@ -37,6 +43,7 @@ import {
   type MarketSkill,
   type MemoryEntry,
   type MemoryQuery,
+  type MvpValidation,
   type NewMemoryEntry,
   type Order,
   type OrderEngine,
@@ -247,6 +254,7 @@ const ERROR_STATUS: Record<string, number> = {
   METHOD_NOT_ALLOWED: 405,
   VERSION_CONFLICT: 409,
   ORDER_STATE_INVALID: 409,
+  STAGE_TRANSITION_INVALID: 409,
   NO_DRAFTS: 409,
   CONTENT_REVIEW_REJECTED: 422,
   PAYLOAD_TOO_LARGE: 413,
@@ -593,6 +601,28 @@ function requireMemoryHub(setup: ConsoleSetup): MemoryBodyHub {
   return setup.memoryHub
 }
 
+/** 生命周期编排器（无状态逻辑，按需组装；与 opc-lifecycle 插件共享同一 core 实现） */
+function requireLifecycle(setup: ConsoleSetup): IdeaLifecycle {
+  return new IdeaLifecycle(requireIdeaStore(setup), setup.memoryHub ?? undefined)
+}
+
+/** 从 research 流正本回读 MVP 验证记录（kind=mvp-validation 的结构化 JSON 条目） */
+function listValidations(hub: MemoryBodyHub, ideaId: string): MvpValidation[] {
+  return hub
+    .query({ ideaIds: [ideaId], stream: 'research', limit: 200 })
+    .map((entry) => {
+      try {
+        return JSON.parse(entry.content) as unknown
+      } catch {
+        return null
+      }
+    })
+    .filter(
+      (v): v is MvpValidation =>
+        typeof v === 'object' && v !== null && (v as MvpValidation).kind === 'mvp-validation',
+    )
+}
+
 function readJsonObject(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -695,6 +725,15 @@ function requireConfidence(body: Record<string, unknown>): number {
     throw new OpcError('VALIDATION_ERROR', 'field confidence is required and must be within [0,1]')
   }
   return confidence
+}
+
+/** MVP 验证评分（0..5，IP-03/IP-04 口径） */
+function requireScore05(body: Record<string, unknown>): number {
+  const score = body.score
+  if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 5) {
+    throw new OpcError('VALIDATION_ERROR', 'field score must be a number within [0,5]')
+  }
+  return score
 }
 
 /** 从计费 write-ahead 日志（每行 {event, record}）解析记录，坏行跳过 */
@@ -1419,6 +1458,97 @@ async function dispatchApi(
             return
           }
           throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/entries is not supported`)
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'transition') {
+          // 阶段迁移（prd2.md 3.4/4.5）：线性单向，成功写 decisions 正本并重写子OS profile
+          if (method !== 'POST') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/transition is not supported`)
+          }
+          const body = await readJsonObject(req)
+          const to = requireOneOf(body, 'to', IDEA_STAGES)
+          const note = typeof body.note === 'string' ? body.note : undefined
+          sendJson(req, res, 200, requireLifecycle(setup).transition(ideaId, to, note))
+          return
+        }
+        if (segments.length === 3 && decodePathSegment(segments[1], 'sub') === 'mvp') {
+          const sub = decodePathSegment(segments[2], 'sub')
+          const store = requireIdeaStore(setup)
+          const idea = store.require(ideaId)
+          const hub = setup.memoryHub
+          if (sub === 'plan' && method === 'POST') {
+            // IP-01：三域 → MVP 方案（模板策略），方案正本写入 decisions 流
+            const plan = planMvp(idea.id, idea.domains)
+            hub?.write(ideaId, 'decisions', {
+              content: JSON.stringify({ kind: 'mvp-plan', plan }),
+              confidence: 0.85,
+              authority: 'model',
+            })
+            sendJson(req, res, 200, { plan })
+            return
+          }
+          if (sub === 'validation' && method === 'POST') {
+            // IP-03：验证记录（用户反馈/数据指标）写入创意记忆体 research 流
+            const body = await readJsonObject(req)
+            const score = body.score === undefined ? undefined : requireScore05(body)
+            const record: MvpValidation = {
+              kind: 'mvp-validation',
+              source: requireOneOf(body, 'source', ['feedback', 'metric'] as const),
+              ...(score !== undefined ? { score } : {}),
+              content: requireString(body, 'content'),
+              at: Date.now(),
+            }
+            requireMemoryHub(setup).write(ideaId, 'research', {
+              content: JSON.stringify(record),
+              confidence: 0.8,
+              authority: 'user',
+            })
+            sendJson(req, res, 200, { record })
+            return
+          }
+          if (sub === 'suggestion' && method === 'GET') {
+            // IP-04：Go/No-Go 建议（确定性规则：≥2 条且均值 ≥3.5 → go）
+            const validations = listValidations(requireMemoryHub(setup), ideaId)
+            sendJson(req, res, 200, { suggestion: suggestGoNoGo(validations), validations })
+            return
+          }
+          throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+        }
+        if (segments.length >= 2 && decodePathSegment(segments[1], 'sub') === 'workspace') {
+          // IP-02 工作区：Agent 读写根限定 ideas/<id>/workspace/，越界一律 PERMISSION_DENIED
+          const store = requireIdeaStore(setup)
+          store.require(ideaId)
+          const ideaHome = store.homeDir(ideaId)
+          if (!ideaHome) {
+            throw new OpcError('SERVICE_UNAVAILABLE', 'workspace requires ideas root to be configured')
+          }
+          const ws = new IdeaWorkspace(workspacePathFor(ideaHome))
+          if (segments.length === 2) {
+            if (method !== 'GET') {
+              throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/workspace is not supported`)
+            }
+            sendJson(req, res, 200, { root: ws.path, files: ws.list() })
+            return
+          }
+          if (segments.length === 3 && decodePathSegment(segments[2], 'sub') === 'file') {
+            if (method === 'GET') {
+              const relative = nonEmptyParam(url.searchParams.get('path'))
+              if (relative === undefined) {
+                throw new OpcError('VALIDATION_ERROR', 'query parameter path is required')
+              }
+              const content = ws.readFile(relative)
+              if (content === undefined) throw new OpcError('NOT_FOUND', `workspace file not found: ${relative}`)
+              sendJson(req, res, 200, { path: relative, content })
+              return
+            }
+            if (method === 'POST') {
+              const body = await readJsonObject(req)
+              const written = ws.writeFile(requireString(body, 'path'), requireString(body, 'content'))
+              sendJson(req, res, 200, { written })
+              return
+            }
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/workspace/file is not supported`)
+          }
+          throw new OpcError('NOT_FOUND', `no such path: ${path}`)
         }
         throw new OpcError('NOT_FOUND', `no such path: ${path}`)
       }

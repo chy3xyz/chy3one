@@ -71,3 +71,13 @@
     # 'opc.content' / 'opc.content.events' 服务（CE-01~CE-05 算法层）。
     - id: opc-content
       name: '../../dist/dsh-plugins/opc-content/src/index.js'
+
+    # 创意生命周期编排（prd2.md 3.4/4.5，creativeos/lifecycle-manager 的物理形态）：
+    # 'opc.lifecycle' 服务——阶段线性推进 + decisions 正本 + 子OS profile 重写。
+    # 与控制台共享同一套 ideas.db / ideas/ 目录 / memory-bodies.db（WAL 多连接）。
+    - id: opc-lifecycle
+      name: '../../dist/dsh-plugins/opc-lifecycle/src/index.js'
+      config:
+        ideasDbPath: './opcos-console-data/ideas.db'
+        ideasRoot: './opcos-console-data/ideas'
+        bodiesDbPath: './opcos-console-data/memory-bodies.db'

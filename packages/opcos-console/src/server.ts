@@ -33,6 +33,7 @@ import {
 import { plugin as billingPlugin } from '../../dsh-plugins/opc-billing/src/index.js'
 import { plugin as blackboardPlugin } from '../../dsh-plugins/opc-blackboard/src/index.js'
 import { plugin as contentPlugin } from '../../dsh-plugins/opc-content/src/index.js'
+import { plugin as lifecyclePlugin } from '../../dsh-plugins/opc-lifecycle/src/index.js'
 import { plugin as marketplacePlugin } from '../../dsh-plugins/opc-marketplace/src/index.js'
 import { plugin as memoryPlugin } from '../../dsh-plugins/opc-memory/src/index.js'
 import { plugin as skillForgePlugin } from '../../dsh-plugins/opc-skill-forge/src/index.js'
@@ -104,6 +105,16 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     { plugin: billingPlugin, config: { resolvedUnitPrice: 2.5, logFile: join(dataDir, 'billing.jsonl') } },
     { plugin: marketplacePlugin },
     { plugin: contentPlugin },
+    {
+      // 创意生命周期编排（prd2.md 8.2 lifecycle-manager）：与控制台共享 ideas.db/
+      // ideas/ 目录/memory-bodies.db（多连接经 WAL 并发），DSH 侧经 'opc.lifecycle' 服务迁移阶段
+      plugin: lifecyclePlugin,
+      config: {
+        ideasDbPath: join(dataDir, 'ideas.db'),
+        ideasRoot: join(dataDir, 'ideas'),
+        bodiesDbPath: join(dataDir, 'memory-bodies.db'),
+      },
+    },
   ]
   const quarantineFile = join(dataDir, 'opcos-quarantine.json')
   const markerFile = join(dataDir, 'opcos-boot-marker.json')

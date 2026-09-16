@@ -81,6 +81,7 @@ test('console: /api/health 全插件握手 + /api/overview 聚合 + 静态占位
       'opc-billing',
       'opc-blackboard',
       'opc-content',
+      'opc-lifecycle',
       'opc-marketplace',
       'opc-memory',
       'opc-skill-forge',
@@ -712,6 +713,91 @@ test('console: 创意实体端点（M1）——详情/三域迭代/记忆体检�
   const gq = await getJson<{ questions: Record<string, string[]> }>(`${url}api/guiding-questions`)
   assert.equal(gq.status, 200)
   assert.ok(gq.body.questions.problem.length >= 3)
+})
+
+test('console: 生命周期/MVP/工作区端点（M2）——迁移409、MVP方案正本、Go/No-Go、工作区越界403', async (t) => {
+  const { url } = await launch(t)
+  const created = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, {
+    text: 'AI 落地页生成器。打算做一个对话式建站工具。面向出海市场。',
+  })
+  const idea = created.body.idea
+  assert.ok(idea)
+
+  // 阶段迁移：跳跃拒绝（409 STAGE_TRANSITION_INVALID），单步推进成功
+  const skip = await postJson<{ error: { code: string } }>(`${url}api/ideas/${idea.id}/transition`, { to: 'asset' })
+  assert.equal(skip.status, 409)
+  assert.equal(skip.body.error.code, 'STAGE_TRANSITION_INVALID')
+  const ok = await postJson<{ idea: IdeaEntity; transition: { from: string; to: string; note: string } }>(
+    `${url}api/ideas/${idea.id}/transition`, { to: 'product' },
+  )
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.idea.stage, 'product')
+  assert.equal(ok.body.transition.from, 'description')
+  assert.ok(ok.body.transition.note.includes('MVP验证通过'), '默认决策文案来自 prd2.md 3.4')
+
+  // 迁移决策正本已写入 decisions 流
+  const detail = await getJson<{ entries: Array<{ stream: string; content: string }> }>(`${url}api/ideas/${idea.id}`)
+  const decisions = detail.body.entries.filter((e) => e.stream === 'decisions')
+  assert.equal(decisions.length, 1)
+  assert.ok(JSON.parse(decisions[0]?.content ?? '{}').kind === 'stage-transition')
+
+  // MVP 方案：三域 → 功能清单/技术栈/开发计划，正本写 decisions（IP-01）
+  const plan = await postJson<{ plan: { features: string[]; techStack: string[]; milestones: unknown[] } }>(
+    `${url}api/ideas/${idea.id}/mvp/plan`, {},
+  )
+  assert.equal(plan.status, 200)
+  assert.ok(plan.body.plan.features.length > 0)
+  assert.ok(plan.body.plan.techStack.length > 0)
+  assert.equal(plan.body.plan.milestones.length, 3)
+
+  // Go/No-Go：空记录 no-go；两条高分记录后 go（IP-04）
+  const sug0 = await getJson<{ suggestion: { suggestion: string; validations: number } }>(
+    `${url}api/ideas/${idea.id}/mvp/suggestion`,
+  )
+  assert.equal(sug0.body.suggestion.suggestion, 'no-go')
+  assert.equal(sug0.body.suggestion.validations, 0)
+  const v1 = await postJson<{ record: { kind: string; source: string } }>(`${url}api/ideas/${idea.id}/mvp/validation`, {
+    source: 'feedback', content: '内测 12 人，10 人愿意付费', score: 4.5,
+  })
+  assert.equal(v1.status, 200)
+  assert.equal(v1.body.record.kind, 'mvp-validation')
+  await postJson(`${url}api/ideas/${idea.id}/mvp/validation`, {
+    source: 'metric', content: '落地页转化率 6.2%', score: 4,
+  })
+  const sug1 = await getJson<{ suggestion: { suggestion: string; validations: number }; validations: unknown[] }>(
+    `${url}api/ideas/${idea.id}/mvp/suggestion`,
+  )
+  assert.equal(sug1.body.suggestion.suggestion, 'go')
+  assert.equal(sug1.body.suggestion.validations, 2)
+  assert.equal(sug1.body.validations.length, 2)
+
+  // 评分越界 400
+  const badScore = await postJson<{ error: { code: string } }>(`${url}api/ideas/${idea.id}/mvp/validation`, {
+    source: 'metric', content: 'x', score: 9,
+  })
+  assert.equal(badScore.status, 400)
+
+  // 工作区（IP-02）：写读列 + 越界 403
+  const write = await postJson<{ written: { path: string } }>(`${url}api/ideas/${idea.id}/workspace/file`, {
+    path: 'src/main.ts', content: 'console.log("mvp")\n',
+  })
+  assert.equal(write.status, 200)
+  assert.ok(write.body.written.path.includes('workspace'))
+  const list = await getJson<{ root: string; files: string[] }>(`${url}api/ideas/${idea.id}/workspace`)
+  assert.deepEqual(list.body.files, ['src/main.ts'])
+  const read = await getJson<{ content: string }>(
+    `${url}api/ideas/${idea.id}/workspace/file?path=${encodeURIComponent('src/main.ts')}`,
+  )
+  assert.equal(read.body.content, 'console.log("mvp")\n')
+  const escape = await postJson<{ error: { code: string } }>(`${url}api/ideas/${idea.id}/workspace/file`, {
+    path: '../../escape.txt', content: 'x',
+  })
+  assert.equal(escape.status, 403)
+  assert.equal(escape.body.error.code, 'PERMISSION_DENIED')
+  const missing = await getJson<{ error: { code: string } }>(
+    `${url}api/ideas/${idea.id}/workspace/file?path=ghost.txt`,
+  )
+  assert.equal(missing.status, 404)
 })
 
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {

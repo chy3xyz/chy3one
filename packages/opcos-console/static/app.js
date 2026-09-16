@@ -366,18 +366,42 @@
           h('span', { class: 'muted small', text: fmtTime(idea.createdAt) })))));
     }, '创意列表加载失败');
 
-    /** 详情区：阶段进度 + 三域编辑（带引导问题）+ 记忆体检索/写入 + 挂载开关 */
+    /** 详情区：阶段推进 + 三域编辑（带引导问题）+ MVP 方案/验证 + 记忆体 + 工作区 */
     async function openDetail() {
       if (!selectedId) { detailBox.innerHTML = ''; return; }
       await loadInto(detailBox, '加载创意详情…', async () => {
-        const d = await api.get(`/api/ideas/${selectedId}`);
+        const [d, sg, ws] = await Promise.all([
+          api.get(`/api/ideas/${selectedId}`),
+          api.get(`/api/ideas/${selectedId}/mvp/suggestion`).catch(() => null),
+          api.get(`/api/ideas/${selectedId}/workspace`).catch(() => null),
+        ]);
         const idea = d.idea;
         const domains = idea.domains || {};
         const questions = d.guidingQuestions || {};
+        const stageIndex = IDEA_STAGES.indexOf(idea.stage);
 
-        const stepper = h('div', { class: 'tabs' }, IDEA_STAGES.map(s =>
-          h('button', { class: `tab${s === idea.stage ? ' active' : ''}`, type: 'button', disabled: true },
-            h('span', { text: IDEA_STAGE_LABELS[s] }))));
+        // 阶段进度：合法的下一阶段可点击推进（生命周期线性单向，prd2.md 1.2）
+        const stepper = h('div', { class: 'tabs' }, IDEA_STAGES.map((s, i) => {
+          const isCurrent = s === idea.stage;
+          const isNext = i === stageIndex + 1;
+          const btn = h('button', { class: `tab${isCurrent ? ' active' : ''}`, type: 'button' },
+            h('span', { text: IDEA_STAGE_LABELS[s] }));
+          if (isCurrent) btn.disabled = true;
+          else if (isNext) {
+            btn.title = `推进到${IDEA_STAGE_LABELS[s]}`;
+            btn.addEventListener('click', async () => {
+              const note = window.prompt(`推进到「${IDEA_STAGE_LABELS[s]}」的依据（如：MVP 验证通过 / 内测数据过线）：`, '');
+              if (note === null) return;
+              btn.disabled = true;
+              try {
+                const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: note || undefined });
+                toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
+                await Promise.all([openDetail(), loadList()]);
+              } catch { /* 错误已由 api 层 toast；恢复可点击以便重试 */ btn.disabled = false; }
+            });
+          } else btn.disabled = true;
+          return btn;
+        }));
 
         const domainCards = DOMAIN_KEYS.map(key => {
           const domain = domains[key] || { summary: '', points: [] };
@@ -401,6 +425,63 @@
               ui.field('概述 summary', summaryInput), ui.field('要点 points（一行一个）', pointsInput)),
             h('div', { class: 'toolbar-actions' }, saveBtn));
         });
+
+        // MVP 区（阶段二）：方案生成 + 验证记录 + Go/No-Go
+        const mvpBox = h('div');
+        const renderMvp = (suggestion, plan) => {
+          const sug = suggestion && suggestion.suggestion;
+          render(mvpBox,
+            h('div', { class: 'memory-head' },
+              ui.badge(sug === 'go' ? 'Go：验证充分，可以推进' : sug === 'no-go' ? 'No-Go：验证还不够' : '还没有建议', sug === 'go' ? 'ok' : 'muted'),
+              h('span', { class: 'muted small', text: sug ? `依据 ${suggestion.validations} 条验证记录` : '' })),
+            (suggestion && suggestion.suggestion === 'no-go')
+              ? h('ul', { class: 'muted small' }, suggestion.reasons.map(r => h('li', { text: r }))) : null,
+            plan ? h('div', {},
+              h('h4', { text: 'MVP 功能清单' }),
+              h('ul', {}, plan.features.map(f => h('li', { text: f }))),
+              h('h4', { text: '技术栈建议' }),
+              h('ul', {}, plan.techStack.map(t => h('li', { text: t }))),
+              h('h4', { text: '开发计划' }),
+              ...plan.milestones.map(m => h('p', { class: 'small' }, h('strong', { text: m.title }), '：', m.items.join('；'))))
+              : ui.empty('还没有 MVP 方案——三域完善后点「生成 MVP 方案」'));
+        };
+        renderMvp(sg && sg.suggestion ? sg : null, null);
+        const planBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '生成 MVP 方案' });
+        busyBtn(planBtn, '生成中…', async () => {
+          const res = await api.post(`/api/ideas/${idea.id}/mvp/plan`, {});
+          toast.ok('MVP 方案已生成，正本已存入决策记忆');
+          renderMvp(sg && sg.suggestion ? sg : null, res.plan);
+        });
+        const vSource = h('select', { class: 'input' },
+          h('option', { value: 'feedback', text: '用户反馈' }),
+          h('option', { value: 'metric', text: '数据指标' }));
+        const vScore = h('input', { class: 'input', type: 'number', min: '0', max: '5', step: '0.5', placeholder: '评分 0-5（可选）' });
+        const vContent = h('input', { class: 'input', placeholder: '验证结论，如：12 人内测，10 人愿付费' });
+        const vBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '记一条验证' });
+        busyBtn(vBtn, '记录中…', async () => {
+          const content = vContent.value.trim();
+          if (!content) return toast.err('先写验证结论');
+          const score = vScore.value === '' ? undefined : Number(vScore.value);
+          const fresh = await api.post(`/api/ideas/${idea.id}/mvp/validation`, {
+            source: vSource.value, content, ...(score !== undefined && Number.isFinite(score) ? { score } : {}),
+          });
+          toast.ok(`已记一条${fresh.record.source === 'metric' ? '数据指标' : '用户反馈'}（ Go/No-Go 已更新）`);
+          vContent.value = ''; vScore.value = '';
+          const freshSg = await api.get(`/api/ideas/${idea.id}/mvp/suggestion`);
+          renderMvp(freshSg, null);
+        });
+
+        // 工作区（IP-02）：文件列表 + 点开查看
+        const wsBox = h('div');
+        const renderWs = (root, files) => render(wsBox, files.length
+          ? h('ul', { class: 'muted small' }, files.map(f => h('li', {},
+              h('a', { href: 'javascript:void(0)', text: f, onclick: async () => {
+                const file = await api.get(`/api/ideas/${idea.id}/workspace/file?path=${encodeURIComponent(f)}`);
+                render(wsBox, h('pre', { class: 'tl-payload', text: file.content }),
+                  h('a', { href: 'javascript:void(0)', text: '← 返回文件列表', onclick: () => renderWs(root, files) }));
+              } }))))
+          : ui.empty('工作区是空的——MVP 开发的文件都写在这里（Agent 读写根限定了本创意）'));
+        renderWs(ws && ws.root, (ws && ws.files) || []);
 
         // 记忆体：最近条目 + 检索 + 写入
         const entriesBox = h('div');
@@ -459,6 +540,11 @@
           stepper,
           h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
           h('div', { class: 'card-grid' }, domainCards),
+          ui.sectionCard('MVP 方案与验证（阶段二）',
+            ui.toolbar(ui.actions(planBtn),
+              h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
+            mvpBox,
+            ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
           h('div', { class: 'two-col' },
             ui.sectionCard('记忆体 · 检索与近况',
               ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
@@ -469,7 +555,8 @@
               ui.toolbar(writeBtn),
               d.home ? h('details', { class: 'collapse' },
                 h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
-                h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)));
+                h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)),
+          ui.sectionCard('工作区（MVP 开发文件）', wsBox));
       }, '创意详情加载失败');
     }
 
