@@ -63,6 +63,8 @@
   /* ===== api：fetch 封装，非 2xx 时读取 {error:{code,message}} 并 toast 后抛出 ===== */
   // 部署路径自感知：standalone 服务在 /，DSH hosted 模式挂在 /opcos 前缀下
   const API_BASE = location.pathname.startsWith('/opcos') ? '/opcos' : '';
+  /** 会话过期只提示一次并回到登录页，避免轮询面板反复弹错 */
+  let sessionExpiredHandled = false;
   const api = {
     async request(method, path, body) {
       let res;
@@ -81,7 +83,17 @@
       try { data = await res.json(); } catch { /* 204 等空响应 */ }
       if (!res.ok) {
         const err = (data && data.error) || { code: `HTTP_${res.status}`, message: res.statusText || '请求失败' };
-        toast.err(`出了点小状况（${err.code}）。创意和收入数据不受影响，重试即可`);
+        if ((err.code === 'UNAUTHORIZED' || err.code === 'AUTH_FAILED') && !sessionExpiredHandled) {
+          // 会话过期：回到登录页（登录/注册页自身的 fetch 不走本封装，不会递归）
+          sessionExpiredHandled = true;
+          toast.err('登录已过期，请重新登录');
+          const badge = $('#user-badge');
+          if (badge) badge.textContent = '未登录';
+          $('#logout-btn')?.classList.add('hidden');
+          renderLogin();
+        } else if (!sessionExpiredHandled) {
+          toast.err(`出了点小状况（${err.code}）。创意和收入数据不受影响，重试即可`);
+        }
         throw err;
       }
       return data;
@@ -394,7 +406,8 @@
         const questions = d.guidingQuestions || {};
         const stageIndex = IDEA_STAGES.indexOf(idea.stage);
 
-        // 阶段进度：合法的下一阶段可点击推进（生命周期线性单向，prd2.md 1.2）
+        // 阶段进度：合法的下一阶段可点击推进（生命周期线性单向，prd2.md 1.2）；
+        // 点击展开内联迁移表单（不使用浏览器原生弹窗）
         const stepper = h('div', { class: 'tabs' }, IDEA_STAGES.map((s, i) => {
           const isCurrent = s === idea.stage;
           const isNext = i === stageIndex + 1;
@@ -403,15 +416,27 @@
           if (isCurrent) btn.disabled = true;
           else if (isNext) {
             btn.title = `推进到${IDEA_STAGE_LABELS[s]}`;
-            btn.addEventListener('click', async () => {
-              const note = window.prompt(`推进到「${IDEA_STAGE_LABELS[s]}」的依据（如：MVP 验证通过 / 内测数据过线）：`, '');
-              if (note === null) return;
-              btn.disabled = true;
-              try {
-                const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: note || undefined });
-                toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
-                await Promise.all([openDetail(), loadList()]);
-              } catch { /* 错误已由 api 层 toast；恢复可点击以便重试 */ btn.disabled = false; }
+            btn.addEventListener('click', () => {
+              const existing = $('#transition-form');
+              if (existing) existing.remove();
+              const noteInput = h('input', { class: 'input', placeholder: `推进依据，如：MVP 验证过线 / 内测数据达标` });
+              const confirmBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '确认推进' });
+              const cancelBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '取消' });
+              const form = h('div', { class: 'card section-card', id: 'transition-form', style: 'margin-top:10px' },
+                h('p', { class: 'small', style: 'margin:0 0 6px' },
+                  h('strong', { text: `推进到「${IDEA_STAGE_LABELS[s]}」` }), ' —— 生命周期只允许线性推进，此操作会写入决策记忆'),
+                ui.toolbar(ui.grow(ui.field('推进依据 note', noteInput)), ui.actions(confirmBtn, cancelBtn)));
+              stepper.after(form);
+              cancelBtn.addEventListener('click', () => form.remove());
+              confirmBtn.addEventListener('click', async () => {
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = '推进中…';
+                try {
+                  const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: noteInput.value.trim() || undefined });
+                  toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
+                  await Promise.all([openDetail(), loadList()]);
+                } catch { confirmBtn.disabled = false; confirmBtn.textContent = '确认推进'; }
+              });
             });
           } else btn.disabled = true;
           return btn;
@@ -1066,20 +1091,66 @@
     const qInput = h('input', { class: 'input', placeholder: '按名称搜索' }),
       categoryInput = h('input', { class: 'input', placeholder: '类别，如 automation' }),
       compatInput = h('input', { class: 'input', placeholder: 'DSH 版本，如 0.1.5' }),
+      stageSelect = h('select', { class: 'input' },
+        h('option', { value: '', text: '全部阶段' }),
+        ...IDEA_STAGES.map(s => h('option', { value: s, text: IDEA_STAGE_LABELS[s] }))),
+      targetSelect = h('select', { class: 'input' }, h('option', { value: '', text: '个人（全局）' })),
       searchBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '搜索' }),
       totalText = h('span', { class: 'muted small' }),
       tableBox = h('div'), draftsBox = h('div'), publishBox = h('div');
+    // 安装目标：个人或我的某个创意（SM-02 安装到创意子操作系统）
+    api.get('/api/ideas').then(data => {
+      for (const idea of (data && data.ideas) || []) {
+        targetSelect.append(h('option', { value: idea.id, text: `创意：${idea.name}` }));
+      }
+    }).catch(() => { /* 创意库缺席：仅个人 */ });
     const kv = (k, v) => h('div', { class: 'kv' },
       h('span', { class: 'kv-k', text: k }), h('span', { class: 'kv-v', text: v }));
+    const PRICING_LABELS = { free: '免费', one_time: '一次性', subscription: '订阅' };
+    function pricingCell(skill) {
+      const pricing = skill.pricing || { model: skill.price === 0 ? 'free' : 'one_time' };
+      const modelText = PRICING_LABELS[pricing.model] || pricing.model || '一次性';
+      const periodText = pricing.period === 'monthly' ? '·月' : pricing.period === 'quarterly' ? '·季' : pricing.period === 'yearly' ? '·年' : '';
+      return `${modelText}${periodText} ${money(skill.price)}`;
+    }
     function installButton(skill) {
-      const btn = h('button', { class: 'btn btn-sm', type: 'button', text: '安装' });
+      const isSub = (skill.pricing || {}).model === 'subscription';
+      const btn = h('button', { class: 'btn btn-sm', type: 'button', text: isSub ? '安装（校验订阅）' : '安装' });
       btn.addEventListener('click', async () => {
         btn.disabled = true; btn.textContent = '安装中…';
         try {
-          const res = await api.post('/api/skills/install', { skillId: skill.id });
-          toast.ok(`安装成功：${res && res.installedPath}`);
+          const res = await api.post('/api/skills/install', {
+            skillId: skill.id,
+            ...(targetSelect.value ? { ideaId: targetSelect.value } : {}),
+            ...(currentUser ? { buyerId: currentUser.username } : {}),
+          });
+          toast.ok(`安装成功：${res && res.installedPath}${res && res.ideaId ? '（已装入创意子操作系统）' : ''}`);
           btn.textContent = '已安装';
-        } catch { btn.disabled = false; btn.textContent = '重试'; }
+        } catch (err) {
+          btn.disabled = false; btn.textContent = '重试';
+          if (err && err.code === 'SUBSCRIPTION_REQUIRED') toast.err('需要有效订阅：请先在订单页订阅该技能');
+        }
+      });
+      return btn;
+    }
+    function subscribeButton(skill) {
+      const btn = h('button', { class: 'btn btn-sm', type: 'button', text: '订阅' });
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '订阅中…';
+        try {
+          const buyerId = (currentUser && currentUser.username) || `buyer-${skill.id}`;
+          const order = await api.post('/api/orders', {
+            skillId: skill.id,
+            version: skill.version,
+            buyerId,
+            amountCents: skill.price || 990,
+          });
+          const paid = await api.post('/api/orders/pay', { orderId: order.id });
+          toast.ok(paid.subscription
+            ? `订阅生效，权益至 ${fmtTime(paid.subscription.expiresAt)}`
+            : '支付成功');
+          search();
+        } catch { btn.disabled = false; btn.textContent = '订阅'; }
       });
       return btn;
     }
@@ -1088,15 +1159,21 @@
       if (qInput.value.trim()) params.set('q', qInput.value.trim());
       if (categoryInput.value.trim()) params.set('category', categoryInput.value.trim());
       if (compatInput.value.trim()) params.set('compat', compatInput.value.trim());
+      if (stageSelect.value) params.set('stage', stageSelect.value);
       const data = await api.get(`/api/skills?${params.toString()}`);
       const results = (data && data.results) || [];
       totalText.textContent = `共 ${data && data.total != null ? data.total : results.length} 个 Skill`;
       return results.length
-        ? ui.table(['名称', '版本', '作者', '价格', '下载', '评分', '兼容', '操作'],
+        ? ui.table(['名称', '版本', '作者', '定价', '阶段', '下载', '评分', '兼容', '操作'],
             results.map(s => [
-              s.name, s.version, s.authorId, money(s.price), num(s.downloads),
+              s.name, s.version, s.authorId, pricingCell(s),
+              s.stage ? (IDEA_STAGE_LABELS[s.stage] || s.stage) : '—',
+              num(s.downloads),
               s.rating != null ? `${Number(s.rating).toFixed(1)} / 5` : '—',
-              (s.compat && s.compat.dsh) || '—', installButton(s),
+              (s.compat && s.compat.dsh) || '—',
+              h('div', { class: 'row-actions' },
+                (s.pricing || {}).model === 'subscription' ? subscribeButton(s) : null,
+                installButton(s)),
             ]))
         : ui.empty('货架还是空的——跑几次内容流水线，本能系统会替你蒸馏出第一个技能');
     }, '搜索失败，请稍后重试');
@@ -1136,12 +1213,15 @@
     }, '草案加载失败');
     searchBtn.addEventListener('click', search);
     onEnter(qInput, search);
+    stageSelect.addEventListener('change', search);
     render(box,
       ui.pageTitle('上货架', '你的重复劳动，别人愿意付钱'),
       ui.sectionCard('从草案上架（草案 → 签名包 → 市场索引）', publishBox),
       ui.sectionCard(null,
         ui.toolbar(ui.field('关键词 q', qInput), ui.field('类别 category', categoryInput),
-          ui.field('兼容版本 compat', compatInput), ui.actions(searchBtn, totalText))),
+          ui.field('生命周期阶段 stage', stageSelect), ui.field('兼容版本 compat', compatInput),
+          ui.actions(searchBtn, totalText),
+          h('span', { class: 'muted small', text: '安装到：' }), targetSelect)),
       tableBox,
       ui.sectionCard('Skill 草案（本能提炼）', draftsBox));
     await Promise.all([search(), loadDrafts(), loadPublish()]);
@@ -1150,15 +1230,19 @@
   /* ===== 面板：订单交易 ===== */
   const isUnpaid = status => !['paid', 'completed', 'succeeded', 'refunded'].includes(String(status || ''));
   ROUTES.orders = async box => {
+    const defaultBuyer = (currentUser && currentUser.username) || 'buyer-001';
     const skillMeta = new Map(),
       skillSelect = h('select', { class: 'input' }, h('option', { value: '', text: '加载 Skill 列表…' })),
-      buyerInput = h('input', { class: 'input', value: 'buyer-001', placeholder: '买家 ID' }),
+      buyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '买家 ID' }),
       amountInput = h('input', { class: 'input', type: 'number', min: '1', step: '1', value: '100' }),
       orderBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '创建订单' }),
       splitBox = h('div'),
-      listBuyerInput = h('input', { class: 'input', value: 'buyer-001', placeholder: '必填：按 buyerId 过滤' }),
+      listBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '必填：按 buyerId 过滤' }),
       refreshBtn = h('button', { class: 'btn', type: 'button', text: '查询订单' }),
-      listBox = h('div');
+      listBox = h('div'),
+      subBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '买家 ID' }),
+      subRefreshBtn = h('button', { class: 'btn', type: 'button', text: '刷新订阅' }),
+      subListBox = h('div');
     skillSelect.addEventListener('change', () => {
       const s = skillMeta.get(skillSelect.value);
       if (s && s.price != null) amountInput.value = String(s.price);
@@ -1235,16 +1319,56 @@
       loadOrders();
     });
     refreshBtn.addEventListener('click', loadOrders);
+    /* 我的订阅（SM-04）：权益窗口 + 一键续订（按市场价下单并支付，自动顺延） */
+    const PERIOD_LABELS = { monthly: '包月', quarterly: '季付', yearly: '年付' };
+    const loadSubs = () => loadInto(subListBox, null, async () => {
+      const buyerId = subBuyerInput.value.trim();
+      if (!buyerId) return ui.empty('填写买家 ID 查看订阅权益');
+      const res = await api.get(`/api/subscriptions?buyerId=${encodeURIComponent(buyerId)}`);
+      const subs = (res && res.subscriptions) || [];
+      if (!subs.length) return ui.empty('暂无订阅——购买订阅制 Skill 后自动生效');
+      return ui.table(['Skill', '周期', '到期时间', '状态', '操作'], subs.map(s => [
+        s.skillId,
+        PERIOD_LABELS[s.period] || s.period,
+        fmtTime(s.expiresAt),
+        s.active ? ui.badge('生效中', 'ok') : ui.badge('已到期', 'err'),
+        (() => {
+          const btn = h('button', { class: 'btn btn-sm', type: 'button', text: s.active ? '续订' : '重新订阅' });
+          btn.addEventListener('click', async () => {
+            btn.disabled = true; btn.textContent = '续订中…';
+            try {
+              const detail = await api.get(`/api/skills/${s.skillId}`);
+              const order = await api.post('/api/orders', {
+                skillId: s.skillId,
+                version: (detail.skill && detail.skill.version) || '1.0.0',
+                buyerId,
+                amountCents: (detail.skill && detail.skill.price) || 990,
+              });
+              const paid = await api.post('/api/orders/pay', { orderId: order.id });
+              toast.ok(paid.subscription
+                ? `续订成功，权益至 ${fmtTime(paid.subscription.expiresAt)}`
+                : '支付成功');
+              loadSubs();
+            } catch { btn.disabled = false; btn.textContent = s.active ? '续订' : '重新订阅'; }
+          });
+          return btn;
+        })(),
+      ]));
+    }, '订阅加载失败');
+    subRefreshBtn.addEventListener('click', loadSubs);
     render(box,
       ui.pageTitle('订单', '每一笔确认的订单，创作者拿 85%'),
       ui.sectionCard('下单',
         ui.toolbar(ui.grow(ui.field('Skill', skillSelect)), ui.field('买家 buyerId', buyerInput),
           ui.field('金额（分）', amountInput), ui.actions(orderBtn))),
       splitBox,
+      ui.sectionCard('我的订阅',
+        ui.toolbar(ui.grow(ui.field('买家 buyerId', subBuyerInput)), ui.actions(subRefreshBtn)),
+        subListBox),
       ui.sectionCard('订单列表',
         ui.toolbar(ui.grow(ui.field('按买家过滤', listBuyerInput)), ui.actions(refreshBtn)),
         listBox));
-    await Promise.all([loadSkillOptions(), loadOrders()]);
+    await Promise.all([loadSkillOptions(), loadOrders(), loadSubs()]);
   };
 
   /* ===== 面板：创作者中心（SF-07） ===== */

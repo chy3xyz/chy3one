@@ -1277,6 +1277,29 @@ test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注�
   assert.equal(installed.status, 200)
   assert.ok(installed.body.installedPath.includes(b.id), 'SM-02：应落盘该创意目录 skills/')
   assert.equal(installed.body.ideaId, b.id)
+
+  // SM-04 订阅权益安装守卫：再次以订阅定价上架 → 未订阅安装 402，订阅后放行；
+  // GET /api/skills/:id 暴露定价模型与阶段元数据
+  await postJson(`${url}api/skills/publish-draft`, { pricingModel: 'subscription', period: 'monthly' })
+  const detail = await getJson<{ pricing: { model: string; period?: string }; meta: { stage?: string; idea_id?: string } }>(
+    `${url}api/skills/${skillId}`,
+  )
+  assert.equal(detail.body.pricing.model, 'subscription')
+  assert.equal(detail.body.pricing.period, 'monthly')
+  assert.equal(detail.body.meta.stage, 'operation')
+  const denied = await postJson<{ error: { code: string } }>(`${url}api/skills/install`, {
+    skillId, buyerId: 'buyer-no-sub',
+  })
+  assert.equal(denied.status, 402)
+  assert.equal(denied.body.error.code, 'SUBSCRIPTION_REQUIRED')
+  const subOrder = await postJson<{ id: string }>(`${url}api/orders`, {
+    skillId, version: '1.0.0', buyerId: 'buyer-no-sub', amountCents: 990,
+  })
+  await postJson(`${url}api/orders/pay`, { orderId: subOrder.body.id })
+  const allowed = await postJson<{ installedPath: string }>(`${url}api/skills/install`, {
+    skillId, buyerId: 'buyer-no-sub',
+  })
+  assert.equal(allowed.status, 200, '有效订阅应放行安装')
 })
 
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {

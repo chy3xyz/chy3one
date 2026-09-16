@@ -290,6 +290,7 @@ const ERROR_STATUS: Record<string, number> = {
   CURRENCY_UNSUPPORTED: 400,
   DISTILL_QUALITY_GATE: 400,
   PAYMENT_FAILED: 402,
+  SUBSCRIPTION_REQUIRED: 402,
   PERMISSION_DENIED: 403,
   ORDER_NOT_FOUND: 404,
   SKILL_NOT_FOUND: 404,
@@ -1263,11 +1264,13 @@ async function dispatchApi(
       // SM-04 定价模型：metadata 里携带 pricing_model/period 的条目随结果回传
       const results = matched.slice(0, limit).map((skill) => {
         const pricingModel = setup.skillsIndex.getMetadata(skill.id, 'pricing_model')
+        const stage = setup.skillsIndex.getMetadata(skill.id, 'stage')
         return {
           ...skill,
           ...(pricingModel
             ? { pricing: { model: pricingModel, period: setup.skillsIndex.getMetadata(skill.id, 'period') } }
             : {}),
+          ...(stage ? { stage } : {}),
         }
       })
       sendJson(req, res, 200, { results, total: matched.length })
@@ -1277,6 +1280,17 @@ async function dispatchApi(
     case 'POST /api/skills/install': {
       const body = await readJsonObject(req)
       const skillId = requireString(body, 'skillId')
+      // SM-04 订阅权益：订阅制技能安装需买家在订阅期内（免费/一次性不拦）
+      let buyerId: string | undefined
+      if (setup.skillsIndex.getMetadata(skillId, 'pricing_model') === 'subscription') {
+        buyerId = typeof body.buyerId === 'string' && body.buyerId.trim().length > 0
+          ? body.buyerId.trim()
+          : user?.username
+        if (!buyerId) throw new OpcError('SUBSCRIPTION_REQUIRED', '订阅制技能需要登录后安装（校验订阅权益）')
+        if (setup.subscriptions && !setup.subscriptions.statusOf(buyerId, skillId).active) {
+          throw new OpcError('SUBSCRIPTION_REQUIRED', `skill ${skillId} 需要有效订阅：请先订阅再安装`)
+        }
+      }
       // SM-02 安装到指定创意：body.ideaId → 落盘该创意目录 skills/（子操作系统内），
       // 并写记忆体决策正本；缺省安装到全局 installed/
       const ideaId = typeof body.ideaId === 'string' && body.ideaId.trim().length > 0 ? body.ideaId.trim() : undefined
@@ -1863,6 +1877,23 @@ async function dispatchApi(
     }
 
     default: {
+      // 参数路由：GET /api/skills/:id → 条目 + 定价模型 + 元数据（订阅续订/安装校验用）
+      if (path.startsWith('/api/skills/') && method === 'GET') {
+        const skillId = decodePathSegment(path.slice('/api/skills/'.length), 'skillId')
+        const entry = setup.skillsIndex.get(skillId)
+        if (!entry) throw new OpcError('SKILL_NOT_FOUND', `skill ${skillId} not in market index`)
+        const pricingModel = setup.skillsIndex.getMetadata(skillId, 'pricing_model') ?? 'one_time'
+        const period = setup.skillsIndex.getMetadata(skillId, 'period')
+        sendJson(req, res, 200, {
+          skill: entry,
+          pricing: { model: pricingModel, ...(period ? { period } : {}) },
+          meta: {
+            idea_id: setup.skillsIndex.getMetadata(skillId, 'idea_id'),
+            stage: setup.skillsIndex.getMetadata(skillId, 'stage'),
+          },
+        })
+        return
+      }
       // 参数路由：协作团队（/api/teams/:id）
       //   GET  队伍详情（含成员昵称）；POST members 邀请；POST members/remove 移除
       if (path.startsWith('/api/teams/')) {
