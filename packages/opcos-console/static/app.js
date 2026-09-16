@@ -42,8 +42,11 @@
     return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString('zh-CN', { hour12: false });
   };
   const safeJson = v => { try { return JSON.stringify(v, null, 2); } catch { return String(v); } };
-  /** 清空容器并重新填充 */
-  const render = (box, ...children) => { box.innerHTML = ''; box.append(...children.flat(2)); };
+  /** 清空容器并重新填充（null/undefined/false 子节点安全跳过，不产生 "null" 文本） */
+  const render = (box, ...children) => {
+    box.innerHTML = '';
+    box.append(...children.flat(2).filter(c => c !== null && c !== undefined && c !== false));
+  };
 
   /* ===== toast ===== */
   const toast = (() => {
@@ -484,14 +487,23 @@
 
         // MVP 区（阶段二）：方案生成 + 验证记录 + Go/No-Go
         const mvpBox = h('div');
-        const renderMvp = (suggestion, plan) => {
-          const sug = suggestion && suggestion.suggestion;
+        /**
+         * 渲染 MVP 建议卡。response = GET /mvp/suggestion 的完整响应：
+         * { suggestion: { suggestion:'go'|'no-go', reasons, validations }, validations: [...] }
+         * 判定文本取内层 suggestion.suggestion，记录数取内层 validations（无则回退外层长度）。
+         */
+        const renderMvp = (response, plan) => {
+          const verdict = (response && response.suggestion && response.suggestion.suggestion) || null;
+          const validations = response && response.suggestion
+            ? (response.suggestion.validations ?? (response.validations || []).length)
+            : 0;
+          const reasons = (response && response.suggestion && response.suggestion.reasons) || [];
           render(mvpBox,
             h('div', { class: 'memory-head' },
-              ui.badge(sug === 'go' ? 'Go：验证充分，可以推进' : sug === 'no-go' ? 'No-Go：验证还不够' : '还没有建议', sug === 'go' ? 'ok' : 'muted'),
-              h('span', { class: 'muted small', text: sug ? `依据 ${suggestion.validations} 条验证记录` : '' })),
-            (suggestion && suggestion.suggestion === 'no-go')
-              ? h('ul', { class: 'muted small' }, suggestion.reasons.map(r => h('li', { text: r }))) : null,
+              ui.badge(verdict === 'go' ? 'Go：验证充分，可以推进' : verdict === 'no-go' ? 'No-Go：验证还不够' : '还没有建议', verdict === 'go' ? 'ok' : 'muted'),
+              h('span', { class: 'muted small', text: verdict ? `依据 ${validations} 条验证记录` : '' })),
+            verdict === 'no-go'
+              ? h('ul', { class: 'muted small' }, reasons.map(r => h('li', { text: r }))) : null,
             plan ? h('div', {},
               h('h4', { text: 'MVP 功能清单' }),
               h('ul', {}, plan.features.map(f => h('li', { text: f }))),
@@ -501,12 +513,12 @@
               ...plan.milestones.map(m => h('p', { class: 'small' }, h('strong', { text: m.title }), '：', m.items.join('；'))))
               : ui.empty('还没有 MVP 方案——三域完善后点「生成 MVP 方案」'));
         };
-        renderMvp(sg && sg.suggestion ? sg : null, null);
+        renderMvp(sg, null);
         const planBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '生成 MVP 方案' });
         busyBtn(planBtn, '生成中…', async () => {
           const res = await api.post(`/api/ideas/${idea.id}/mvp/plan`, {});
           toast.ok('MVP 方案已生成，正本已存入决策记忆');
-          renderMvp(sg && sg.suggestion ? sg : null, res.plan);
+          renderMvp(sg, res.plan);
         });
         const vSource = h('select', { class: 'input' },
           h('option', { value: 'feedback', text: '用户反馈' }),
