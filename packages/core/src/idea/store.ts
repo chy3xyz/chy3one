@@ -23,6 +23,10 @@ export interface Idea {
   domains: ThreeDomains
   createdAt: number
   updatedAt: number
+  /** 所有者用户 ID（多用户模式；NULL = 存量无主创意，登录用户均可见） */
+  ownerId?: string
+  /** 所属团队 ID（团队创意：成员均可见可写） */
+  teamId?: string
 }
 
 export interface NewIdeaInput {
@@ -30,6 +34,10 @@ export interface NewIdeaInput {
   text: string
   /** 创意名；缺省从描述派生（前 16 字符） */
   name?: string
+  /** 所有者用户 ID（多用户模式） */
+  ownerId?: string
+  /** 归属团队 ID（需先校验成员关系，校验在调用方完成） */
+  teamId?: string
 }
 
 interface IdeaRow {
@@ -39,6 +47,8 @@ interface IdeaRow {
   domains_json: string
   created_at: number
   updated_at: number
+  owner_id: string | null
+  team_id: string | null
 }
 
 function rowToIdea(row: IdeaRow): Idea {
@@ -49,6 +59,8 @@ function rowToIdea(row: IdeaRow): Idea {
     domains: JSON.parse(row.domains_json) as ThreeDomains,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.owner_id ? { ownerId: row.owner_id } : {}),
+    ...(row.team_id ? { teamId: row.team_id } : {}),
   }
 }
 
@@ -222,6 +234,15 @@ export class SqliteIdeaStore {
       )
     `)
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_stage ON ideas (stage, created_at DESC)')
+    // 多用户迁移（增量列：老库直接 ALTER，列已存在则忽略）
+    for (const column of ['owner_id', 'team_id']) {
+      try {
+        this.db.exec(`ALTER TABLE ideas ADD COLUMN ${column} TEXT`)
+      } catch {
+        /* 列已存在（重复打开同一库） */
+      }
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_owner ON ideas (owner_id, created_at DESC)')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS idea_versions (
         idea_id      TEXT NOT NULL,
@@ -248,10 +269,12 @@ export class SqliteIdeaStore {
       domains: draftThreeDomains(text),
       createdAt: now,
       updatedAt: now,
+      ...(input.ownerId ? { ownerId: input.ownerId } : {}),
+      ...(input.teamId ? { teamId: input.teamId } : {}),
     }
     this.db
-      .prepare('INSERT INTO ideas (id, name, stage, domains_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(idea.id, idea.name, idea.stage, JSON.stringify(idea.domains), idea.createdAt, idea.updatedAt)
+      .prepare('INSERT INTO ideas (id, name, stage, domains_json, created_at, updated_at, owner_id, team_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(idea.id, idea.name, idea.stage, JSON.stringify(idea.domains), idea.createdAt, idea.updatedAt, idea.ownerId ?? null, idea.teamId ?? null)
     this.recordVersion(idea.id, idea.domains, '初始三域草案')
     if (this.ideasRoot) scaffoldIdeaHome(this.ideasRoot, idea)
     return idea
@@ -259,7 +282,7 @@ export class SqliteIdeaStore {
 
   get(id: string): Idea | undefined {
     const rows = this.db
-      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at FROM ideas WHERE id = ?')
+      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas WHERE id = ?')
       .all(id) as unknown as IdeaRow[]
     return rows.length > 0 ? rowToIdea(rows[0]) : undefined
   }
@@ -271,11 +294,36 @@ export class SqliteIdeaStore {
     return idea
   }
 
-  /** 全量列表，新建在前（控制台"最近创意"口径） */
+  /** 访问判定：拥有者 / 团队成员 / 存量无主（owner 为空对所有登录用户可见） */
+  canAccess(ideaId: string, userId: string, teamIds: readonly string[] = []): boolean {
+    const idea = this.get(ideaId)
+    if (!idea) return false
+    if (idea.ownerId === undefined) return true
+    if (idea.ownerId === userId) return true
+    return idea.teamId !== undefined && teamIds.includes(idea.teamId)
+  }
+
+  /** 全量列表，新建在前（管理/市场口径；用户可见性走 listForUser） */
   list(): Idea[] {
     const rows = this.db
-      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at FROM ideas ORDER BY created_at DESC')
+      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas ORDER BY created_at DESC')
       .all() as unknown as IdeaRow[]
+    return rows.map(rowToIdea)
+  }
+
+  /**
+   * 用户可见的创意列表（多用户口径，新建在前）：
+   * 我拥有的 ∪ 我所在团队的 ∪ 存量无主（owner_id IS NULL，登录用户均可见）。
+   */
+  listForUser(userId: string, teamIds: readonly string[] = []): Idea[] {
+    const teamFilter = teamIds.length > 0 ? `OR team_id IN (${teamIds.map(() => '?').join(', ')})` : ''
+    const rows = this.db
+      .prepare(
+        `SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas
+         WHERE owner_id = ? OR owner_id IS NULL ${teamFilter}
+         ORDER BY created_at DESC`,
+      )
+      .all(...[userId, ...teamIds]) as unknown as IdeaRow[]
     return rows.map(rowToIdea)
   }
 

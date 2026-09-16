@@ -11,6 +11,7 @@
      └──────────── 记忆资产（人设/爆款模式/教训）全程沉淀，反哺下一轮创意 ────────────┘
 ```
 
+- **多用户**：注册登录即得专属创意空间；创意归属创建者，团队创意全员可见可写，市场关注/协同强制实名
 - **创意**：控制台一键录入，自动生成三域草案（问题域/解决域/时空域）、初始化独立记忆体与子操作系统，沿 描述→产品→运营→资产 四阶段生命周期推进
 - **作品**：内容引擎按创意人设出稿（人设隔离），五平台矩阵（公众号/小红书/抖音/Twitter/B站）适配分发；重复工作流被本能系统自动蒸馏为可售 Skill（Ed25519 签名 .skillpkg）
 - **收入**：市场订单（85/15 分成、免费/一次性/订阅三种定价、Stripe 测试通道）+ 数字员工 RaaS 计费（自主解决 ¥2.5/次），分成自动入账创意资产账本
@@ -22,7 +23,7 @@
 
 ```bash
 npm install
-npm test        # 构建 + 全部测试（351 项）
+npm test        # 构建 + 全部测试（357 项）
 npm run demo    # 整体系统全链路 Demo（真实 cordis，12 步业务闭环）
 npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 ```
@@ -39,4 +40,4 @@ npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 - packages/dsh-adapter — DSH/Cordis 唯一接触面（升级隔离层 + compat 门禁 + TelemetryBus）
 - packages/dsh-plugins/* — 10 个插件：billing / memory / blackboard / skill-forge / team / marketplace / content / console / lifecycle / geo-monitor
 - packages/opcos-bundle — 可安装 Bundle（cordis.patch.yml + 启动健康握手 + 全链路 Demo）
-- packages/opcos-console — 创意变现控制台（13 面板：漏斗总览/我的创意/创意市场/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）
+- packages/opcos-console — 创意变现控制台（14 面板：漏斗总览/我的创意/创意市场/协作团队/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）；多用户注册登录（scrypt 密码 + HttpOnly 会话），每个创意者独立云操作系统，团队创意成员共享协作

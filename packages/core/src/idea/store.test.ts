@@ -146,6 +146,38 @@ test('idea store: 版本链与回滚（ID-04）——迭代自动入链、恢复
   store.close()
 })
 
+test('idea store: 所有权与可见性（多用户）——owner/团队/存量无主', () => {
+  const store = new SqliteIdeaStore(join(dir, 'ownership.db'))
+  const mine = store.create({ text: '我的私有创意', ownerId: 'user-me' })
+  const teamIdea = store.create({ text: '团队创意', ownerId: 'user-mate', teamId: 'team-1' })
+  const legacy = store.create({ text: '存量无主创意' })
+
+  assert.equal(mine.ownerId, 'user-me')
+  assert.equal(teamIdea.teamId, 'team-1')
+
+  // listForUser：我的 + 团队的 + 无主（不含他人的私有创意）
+  const visible = store.listForUser('user-me', ['team-1'])
+  const visibleIds = visible.map((i) => i.id)
+  assert.ok(visibleIds.includes(mine.id))
+  assert.ok(visibleIds.includes(teamIdea.id))
+  assert.ok(visibleIds.includes(legacy.id))
+  assert.equal(visible.length, 3)
+
+  // 他人视角：只看到团队创意 + 无主
+  const mateVisible = store.listForUser('user-stranger', [])
+  assert.equal(mateVisible.map((i) => i.id).includes(mine.id), false)
+
+  // canAccess：拥有者 ✓ / 团队成员 ✓ / 非成员 ✗ / 存量无主 ✓ / 不存在 ✗
+  assert.equal(store.canAccess(mine.id, 'user-me'), true)
+  assert.equal(store.canAccess(mine.id, 'user-stranger'), false)
+  assert.equal(store.canAccess(teamIdea.id, 'user-mate'), true, 'owner 恒可访问')
+  assert.equal(store.canAccess(teamIdea.id, 'user-stranger', ['team-1']), true)
+  assert.equal(store.canAccess(teamIdea.id, 'user-stranger', ['team-9']), false)
+  assert.equal(store.canAccess(legacy.id, 'user-stranger'), true)
+  assert.equal(store.canAccess('idea-none', 'user-me'), false)
+  store.close()
+})
+
 test('idea store: list 新建在前 / count / require 404 语义', () => {
   let clock = 10_000
   const store = new SqliteIdeaStore(join(dir, 'list.db'), undefined, () => clock)

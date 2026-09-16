@@ -24,7 +24,16 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import type { TelemetryEvent } from '../../dsh-adapter/src/index.js'
-import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaMarket, SqliteIdeaStore, SubscriptionStore } from '../../core/src/index.js'
+import {
+  MemoryBodyIndex,
+  MemoryBodyHub,
+  SqliteIdeaMarket,
+  SqliteIdeaStore,
+  SubscriptionStore,
+  SessionStore,
+  TeamStore,
+  UserStore,
+} from '../../core/src/index.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -60,6 +69,11 @@ export interface ConsoleOptions {
   skillsDbPath?: string
   /** 测试/内省钩子：启动完成后以宿主 getService 暴露服务表（生产不传） */
   onReady?: (getService: (name: string) => unknown) => void
+  /**
+   * 多用户鉴权（默认开启）：注册/登录/团队协作 + 创意所有权。
+   * false 仅用于本地兼容测试（v1 单用户无鉴权行为）；生产保持开启。
+   */
+  auth?: boolean
 }
 
 export interface RunningConsole {
@@ -151,6 +165,15 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     marketRoot: join(dataDir, 'ideas-market'),
   })
   const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
+  // 多用户身份层（生产默认开启；opts.auth=false 仅为本地兼容测试保留 v1 行为）
+  const auth =
+    opts.auth === false
+      ? undefined
+      : {
+          users: new UserStore(join(dataDir, 'users.db')),
+          sessions: new SessionStore(join(dataDir, 'sessions.db')),
+          teams: new TeamStore(join(dataDir, 'teams.db')),
+        }
 
   const deps: ConsoleDeps = {
     getService: (name) => ctx.get(name),
@@ -168,6 +191,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     ideaMarket,
     signingKeys,
     subscriptions,
+    auth,
   }
   const setup = createApiSetup(deps)
 
@@ -200,6 +224,9 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     bodyIndex.close()
     ideaMarket.close()
     subscriptions.close()
+    auth?.users.close()
+    auth?.sessions.close()
+    auth?.teams.close()
     index.close()
   }
 

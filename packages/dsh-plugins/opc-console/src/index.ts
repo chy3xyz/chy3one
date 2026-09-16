@@ -29,7 +29,16 @@ import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
 
 import { defineOpcPlugin, type OpcContext, type TelemetryEvent } from '../../../dsh-adapter/src/index.js'
-import { MemoryBodyHub, MemoryBodyIndex, SqliteIdeaMarket, SqliteIdeaStore, SubscriptionStore } from '../../../core/src/index.js'
+import {
+  MemoryBodyHub,
+  MemoryBodyIndex,
+  SqliteIdeaMarket,
+  SqliteIdeaStore,
+  SubscriptionStore,
+  SessionStore,
+  TeamStore,
+  UserStore,
+} from '../../../core/src/index.js'
 import {
   createApiSetup,
   createMarketCatalog,
@@ -65,6 +74,8 @@ export interface Config {
    * - 'off'：不校验（已有反代/网关鉴权，或纯内网部署时使用）。
    */
   auth?: 'inherit' | 'off'
+  /** 多用户鉴权（默认开启）：注册/登录/团队协作 + 创意所有权；false 为 v1 单用户兼容模式 */
+  userAuth?: boolean
 }
 
 /** DSH webServer 路由（结构子集，见 @deepseek-ai/dsh-host-webserver 的 register 契约） */
@@ -137,7 +148,7 @@ function isWebServer(value: unknown): value is DshWebServer {
  * 一次性副作用（skills.db、示例技能）在此发生；埋点退订与 index.close 的
  * 清理一并注册进 ctx.onDispose。
  */
-function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
+function createSetup(ctx: OpcContext, dataDir: string, userAuth?: boolean): ConsoleSetup {
   const getService = (serviceName: string): unknown => ctx.getService(serviceName)
 
   // 一次性初始化：市场索引 + 库空预置 3 条示例 + createPackage 密钥（照搬 server.ts）
@@ -155,10 +166,22 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
     marketRoot: join(dataDir, 'ideas-market'),
   })
   const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
+  // 多用户身份层（默认开启；userAuth=false 仅为本地兼容测试保留 v1 行为）
+  const auth =
+    userAuth === false
+      ? undefined
+      : {
+          users: new UserStore(join(dataDir, 'users.db')),
+          sessions: new SessionStore(join(dataDir, 'sessions.db')),
+          teams: new TeamStore(join(dataDir, 'teams.db')),
+        }
 
   // 关停（LIFO）：市场索引最后关——先撤路由/HTTP server，再退订埋点，最后 close 索引
   ctx.onDispose(() => index.close())
   ctx.onDispose(() => subscriptions.close())
+  ctx.onDispose(() => auth?.users.close())
+  ctx.onDispose(() => auth?.sessions.close())
+  ctx.onDispose(() => auth?.teams.close())
   ctx.onDispose(() => ideaMarket.close())
   ctx.onDispose(() => bodyIndex.close())
   ctx.onDispose(() => ideaStore.close())
@@ -181,6 +204,7 @@ function createSetup(ctx: OpcContext, dataDir: string): ConsoleSetup {
     ideaMarket,
     signingKeys,
     subscriptions,
+    auth,
     // handshake 缺省 → /api/health 按服务可用性实时探测（probeHandshake）
   })
 }
@@ -445,7 +469,7 @@ export function apply(ctx: OpcContext, config: Config): void {
   const dataDir = resolve(config.dataDir ?? DEFAULT_DATA_DIR)
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 
-  const setup = createSetup(ctx, dataDir)
+  const setup = createSetup(ctx, dataDir, config.userAuth)
 
   // 运行状态服务（供测试与宿主观测；unload 后随服务表一并撤销）
   let status: { mode: 'standalone' | 'hosted'; url?: string } = { mode: 'hosted' }

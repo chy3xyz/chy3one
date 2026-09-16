@@ -777,3 +777,7 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
   .funnel { flex-direction: column; }
   .funnel-arrow { align-self: center; transform: rotate(90deg); }
 }
+
+/* 登录页（多用户云操作系统） */
+.login-wrap { display: flex; justify-content: center; padding: 40px 0; }
+.login-card { width: 100%; max-width: 420px; }

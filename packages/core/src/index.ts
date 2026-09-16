@@ -1,4 +1,7 @@
 export * from './errors.js'
+export * from './auth/users.js'
+export * from './auth/sessions.js'
+export * from './auth/teams.js'
 export * from './idea/types.js'
 export * from './idea/three-domains.js'
 export * from './idea/store.js'

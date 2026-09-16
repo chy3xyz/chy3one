@@ -36,11 +36,18 @@ interface OverviewBody {
  *  opts.onReady 透传给 startConsole（测试钩子：暴露宿主 getService，用于预置插件内部状态）。 */
 async function launch(
   t: TestContext,
-  opts: { onReady?: (getService: (name: string) => unknown) => void } = {},
+  opts: { onReady?: (getService: (name: string) => unknown) => void; authEnabled?: boolean } = {},
 ): Promise<{ url: string; dataDir: string }> {
   const dataDir = mkdtempSync(join(tmpdir(), 'opcos-console-'))
   t.after(() => rmSync(dataDir, { recursive: true, force: true }))
-  const con: RunningConsole = await startConsole({ port: 0, host: '127.0.0.1', dataDir, onReady: opts.onReady })
+  // 存量测试默认关鉴权（v1 单用户行为）；authEnabled: true 供多用户鉴权测试显式开启
+  const con: RunningConsole = await startConsole({
+    port: 0,
+    host: '127.0.0.1',
+    dataDir,
+    onReady: opts.onReady,
+    auth: opts.authEnabled === true,
+  })
   t.after(() => con.close())
   return { url: con.url, dataDir }
 }
@@ -1061,6 +1068,115 @@ test('console: 订阅续费语义（SM-04）——支付激活/续费顺延/权�
   const oneTime = await postJson<{ subscription?: unknown }>(`${url}api/skills/publish-draft`, {})
   assert.equal(oneTime.status, 200)
   void oneTime
+})
+
+test('console: 多用户鉴权与团队协作——注册/登录/越权 403/团队可见性/关注防冒名', async (t) => {
+  const { url } = await launch(t, { authEnabled: true })
+  const jar: Record<string, string> = {}
+
+  /** 带 Cookie jar 的请求（两个用户各自的会话互不干扰） */
+  const authedFetch = async (
+    as: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; body: any }> => {
+    const res = await fetch(`${url}${path}`, {
+      method,
+      headers: {
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(jar[as] ? { cookie: jar[as] } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const setCookie = res.headers.get('set-cookie')
+    if (setCookie) jar[as] = setCookie.split(';')[0] ?? jar[as] ?? ''
+    let parsed: unknown = null
+    try {
+      parsed = await res.json()
+    } catch {
+      /* 空响应 */
+    }
+    return { status: res.status, body: parsed }
+  }
+
+  // 未登录访问受保护端点 → 401
+  const anon = await authedFetch('anon', 'GET', 'api/ideas')
+  assert.equal(anon.status, 401)
+  assert.equal(anon.body.error.code, 'UNAUTHORIZED')
+  // 健康探针保持公开
+  assert.equal((await authedFetch('anon', 'GET', 'api/health')).status, 200)
+  // me 探针：未登录 200 + user null
+  assert.equal((await authedFetch('anon', 'GET', 'api/auth/me')).body.user, null)
+
+  // 注册两个创意者（注册即登录）
+  const reg1 = await authedFetch('alice', 'POST', 'api/auth/register', {
+    username: 'alice', password: 'secret123', displayName: '爱丽丝',
+  })
+  assert.equal(reg1.status, 200)
+  assert.equal(reg1.body.user.username, 'alice')
+  const reg2 = await authedFetch('bob', 'POST', 'api/auth/register', {
+    username: 'bob', password: 'secret456',
+  })
+  assert.equal(reg2.status, 200)
+
+  // 重复用户名 409；错误密码 401
+  assert.equal((await authedFetch('anon', 'POST', 'api/auth/register', { username: 'alice', password: 'secret123' })).status, 409)
+  assert.equal((await authedFetch('anon', 'POST', 'api/auth/login', { username: 'alice', password: 'wrong!' })).status, 401)
+
+  // alice 创建私有创意；bob 看不到、改不了
+  const ideaA = await authedFetch('alice', 'POST', 'api/ideas', { text: '爱丽丝的跨境选品创意' })
+  assert.equal(ideaA.status, 200)
+  assert.equal(ideaA.body.idea.ownerId, reg1.body.user.id)
+  const bobList = await authedFetch('bob', 'GET', 'api/ideas')
+  assert.equal(bobList.body.ideas.some((i: { id: string }) => i.id === ideaA.body.idea.id), false, '他人私有创意不可见')
+  const bobPatch = await authedFetch('bob', 'PATCH', `api/ideas/${ideaA.body.idea.id}/domains`, {
+    domain: 'problem', summary: '越权篡改',
+  })
+  assert.equal(bobPatch.status, 403)
+  assert.equal(bobPatch.body.error.code, 'PERMISSION_DENIED')
+
+  // 团队协作：alice 建队邀请 bob；bob 创建团队创意 → 双方可见
+  const team = await authedFetch('alice', 'POST', 'api/teams', { name: '出海小分队' })
+  assert.equal(team.status, 200)
+  const invite = await authedFetch('alice', 'POST', `api/teams/${team.body.team.id}/members`, { username: 'bob' })
+  assert.equal(invite.status, 200)
+  // bob 邀自己进队 → 仅 owner 可操作 403
+  assert.equal(
+    (await authedFetch('bob', 'POST', `api/teams/${team.body.team.id}/members`, { username: 'bob' })).status,
+    403,
+  )
+  const teamIdea = await authedFetch('alice', 'POST', 'api/ideas', {
+    text: '团队共研的选品工具创意', teamId: team.body.team.id,
+  })
+  assert.equal(teamIdea.status, 200)
+  assert.equal(teamIdea.body.idea.teamId, team.body.team.id)
+  // bob 在团队详情可见队友 + 团队创意
+  const bobTeams = await authedFetch('bob', 'GET', 'api/teams')
+  assert.ok(bobTeams.body.teams.some((x: { id: string }) => x.id === team.body.team.id))
+  const bobList2 = await authedFetch('bob', 'GET', 'api/ideas')
+  assert.ok(bobList2.body.ideas.some((i: { id: string }) => i.id === teamIdea.body.idea.id), '团队成员应可见团队创意')
+  // bob 可写团队创意（三域迭代）
+  assert.equal(
+    (await authedFetch('bob', 'PATCH', `api/ideas/${teamIdea.body.idea.id}/domains`, {
+      domain: 'solution', summary: 'bob 补充的方案',
+    })).status,
+    200,
+  )
+
+  // 登录：登出后再访问 401，重新登录恢复
+  await authedFetch('alice', 'POST', 'api/auth/logout', {})
+  assert.equal((await authedFetch('alice', 'GET', 'api/ideas')).status, 401)
+  const relogin = await authedFetch('alice', 'POST', 'api/auth/login', { username: 'alice', password: 'secret123' })
+  assert.equal(relogin.status, 200)
+  assert.equal((await authedFetch('alice', 'GET', 'api/auth/me')).body.user.username, 'alice')
+
+  // 市场关注防冒名：登录态下 follower 强制为当前用户
+  await authedFetch('alice', 'POST', `api/ideas/${teamIdea.body.idea.id}/publish`, {})
+  const follow = await authedFetch('alice', 'POST', `api/market/ideas/${teamIdea.body.idea.id}/follow`, {
+    follower: 'someone-else',
+  })
+  assert.equal(follow.body.follower, 'alice', '登录态下 follower 应强制为当前用户')
 })
 
 test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注通知/排行/协同/阶段过滤/定价/安装到创意', async (t) => {

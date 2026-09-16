@@ -17,6 +17,12 @@ import { gzipSync } from 'node:zlib'
 
 import {
   OpcError,
+  UserStore,
+  SessionStore,
+  TeamStore,
+  extractSessionToken,
+  SESSION_COOKIE,
+  AUTH_FAIL_DELAY_MS,
   SqliteIdeaStore,
   SqliteSkillIndex,
   SqliteIdeaMarket,
@@ -66,7 +72,11 @@ import {
   type SkillDefinition,
   type SplitEntry,
   type Task,
+  type Team,
+  type TeamMember,
+  type TeamRole,
   type ThreeDomains,
+  type User,
   type WriteResult,
 } from '../../core/src/index.js'
 import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
@@ -285,10 +295,15 @@ const ERROR_STATUS: Record<string, number> = {
   SKILL_NOT_FOUND: 404,
   IDEA_NOT_FOUND: 404,
   VERSION_NOT_FOUND: 404,
+  TEAM_NOT_FOUND: 404,
+  USER_NOT_FOUND: 404,
   NOT_FOUND: 404,
   TASK_NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
+  UNAUTHORIZED: 401,
+  AUTH_FAILED: 401,
   VERSION_CONFLICT: 409,
+  USERNAME_TAKEN: 409,
   ORDER_STATE_INVALID: 409,
   STAGE_TRANSITION_INVALID: 409,
   TOKEN_ALLOCATION_EXCEEDED: 409,
@@ -424,6 +439,15 @@ export interface ConsoleDeps {
   subscriptions?: SubscriptionStore
   /** 目录级签名密钥（可选：publish-draft 用它签名新包，保证验签公钥同源） */
   signingKeys?: Ed25519KeyPair
+  /** 多用户身份层（可选：缺省时保持 v1 单用户无鉴权行为） */
+  auth?: AuthStores
+}
+
+/** 多用户身份三件套（users/sessions/teams 同批构造） */
+export interface AuthStores {
+  users: UserStore
+  sessions: SessionStore
+  teams: TeamStore
 }
 
 /** 请求处理层的就绪形态（deps 经默认值补全后的冻结视图） */
@@ -452,6 +476,8 @@ export interface ConsoleSetup {
   readonly subscriptions?: SubscriptionStore
   /** 目录级签名密钥（publish-draft 签名新包用；缺省时每次生成独立密钥） */
   readonly signingKeys?: Ed25519KeyPair
+  /** 多用户身份层（缺省 undefined：单用户无鉴权模式） */
+  readonly auth?: AuthStores
 }
 
 /**
@@ -489,6 +515,7 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
     ideaMarket: deps.ideaMarket,
     signingKeys: deps.signingKeys,
     subscriptions: deps.subscriptions,
+    auth: deps.auth,
   }
 }
 
@@ -662,6 +689,74 @@ function requireSubscriptions(setup: ConsoleSetup): SubscriptionStore {
     throw new OpcError('SERVICE_UNAVAILABLE', 'subscription store is not configured in console deps')
   }
   return setup.subscriptions
+}
+
+/* ─────────────── 多用户鉴权（prd2.md 云操作系统） ─────────────── */
+
+function requireAuthStores(setup: ConsoleSetup): AuthStores {
+  if (!setup.auth) {
+    throw new OpcError('SERVICE_UNAVAILABLE', 'auth stores are not configured in console deps')
+  }
+  return setup.auth
+}
+
+/** 从请求 Cookie 解析当前登录用户（会话滑动续期在 resolve 内发生） */
+function resolveUser(setup: ConsoleSetup, req: IncomingMessage): User | undefined {
+  if (!setup.auth) return undefined
+  const token = extractSessionToken(req.headers.cookie)
+  if (!token) return undefined
+  const session = setup.auth.sessions.resolve(token)
+  if (!session) return undefined
+  return setup.auth.users.getById(session.userId)
+}
+
+/** 签发会话并写入 HttpOnly Cookie（反代 HTTPS 场景自动加 Secure） */
+function issueSession(setup: ConsoleSetup, req: IncomingMessage, res: ServerResponse, userId: string): void {
+  const { sessions } = requireAuthStores(setup)
+  const { token, expiresAt } = sessions.create(userId)
+  const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : ''
+  res.setHeader(
+    'set-cookie',
+    `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${new Date(expiresAt).toUTCString()}${secure}`,
+  )
+}
+
+function clearSessionCookie(res: ServerResponse): void {
+  res.setHeader('set-cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`)
+}
+
+/** 当前用户的团队 ID 列表（创意可见性口径） */
+function userTeamIds(setup: ConsoleSetup, user: User): string[] {
+  if (!setup.auth) return []
+  return setup.auth.teams.listForUser(user.id).map((t) => t.id)
+}
+
+/** 创意访问控制：owner / 团队成员 / 存量无主（在 store.require 404 之后调用，命中不了抛 403） */
+function requireIdeaAccess(setup: ConsoleSetup, user: User, ideaId: string): void {
+  if (!setup.ideaStore) return
+  if (!setup.ideaStore.canAccess(ideaId, user.id, userTeamIds(setup, user))) {
+    throw new OpcError('PERMISSION_DENIED', `idea ${ideaId} is not accessible to ${user.username}`)
+  }
+}
+
+/** 成员信息补充用户名/昵称（控制台展示用；查无此人保留 ID） */
+function enrichMember(users: UserStore, member: TeamMember): TeamMember & { username?: string; displayName?: string } {
+  const found = users.getById(member.userId)
+  return {
+    ...member,
+    ...(found ? { username: found.username, displayName: found.displayName } : {}),
+  }
+}
+
+/** 公开端点白名单：健康探针与登录/注册（其余一律需要会话） */
+function isAnonymousAllowed(path: string): boolean {
+  return path === '/api/health' || path.startsWith('/api/auth/')
+}
+
+/** 需要登录的端点取当前用户（鉴权闸门已保证 auth 开启时非匿名路径必有 user） */
+function requireUser(user: User | undefined): User {
+  if (!user) throw new OpcError('UNAUTHORIZED', 'login required')
+  return user
 }
 
 /** 创意市场索引必取 */
@@ -1010,6 +1105,11 @@ async function dispatchApi(
   setup: ConsoleSetup,
 ): Promise<void> {
   const method = (req.method ?? 'GET').toUpperCase()
+  // 多用户鉴权闸门：未登录一律 401（健康探针与 /api/auth/* 除外；未配置 auth 库 = v1 单用户模式不拦）
+  const user = resolveUser(setup, req)
+  if (!user && !isAnonymousAllowed(path) && setup.auth) {
+    throw new OpcError('UNAUTHORIZED', 'login required (POST /api/auth/login or /api/auth/register)')
+  }
   switch (`${method} ${path}`) {
     case 'GET /api/health': {
       const outcomes = setup.handshake().outcomes
@@ -1508,7 +1608,22 @@ async function dispatchApi(
       }
       const optionalName =
         typeof body.name === 'string' && body.name.trim().length > 0 ? body.name.trim() : undefined
-      const idea = store.create({ text, name: optionalName })
+      // 多用户：创意归属当前登录者；teamId 归属需为该团队成员（v1 无鉴权模式不归属）
+      const owner = setup.auth ? requireUser(user) : undefined
+      let teamId: string | undefined
+      if (owner && typeof body.teamId === 'string' && body.teamId.trim().length > 0) {
+        teamId = body.teamId.trim()
+        const teams = setup.auth?.teams
+        if (!teams || !teams.isMember(teamId, owner.id)) {
+          throw new OpcError('PERMISSION_DENIED', `team ${teamId} is not accessible to ${owner.username}`)
+        }
+      }
+      const idea = store.create({
+        text,
+        name: optionalName,
+        ...(owner ? { ownerId: owner.id } : {}),
+        ...(teamId ? { teamId } : {}),
+      })
       const memory = setup.getService('opc.memory') as MemoryService | undefined
       memory?.write({ scope: 'global', category: 'topic', content: text, confidence: 0.8 })
       const content = setup.getService('opc.content') as ContentService | undefined
@@ -1522,9 +1637,16 @@ async function dispatchApi(
     }
 
     case 'GET /api/ideas': {
-      // 创意列表：实体库新建在前；未配置实体库时降级为 topic 记忆伪实体（前端同构渲染）
+      // 创意列表：实体库按登录者可见性过滤（我的 + 团队的 + 存量无主）；
+      // 未配置实体库时降级为 topic 记忆伪实体（前端同构渲染）
       const store = setup.ideaStore
       if (store) {
+        // 多用户：按登录者可见性过滤；v1 无鉴权模式保持全量列表
+        if (setup.auth) {
+          const owner = requireUser(user)
+          sendJson(req, res, 200, { ideas: store.listForUser(owner.id, userTeamIds(setup, owner)) })
+          return
+        }
         sendJson(req, res, 200, { ideas: store.list() })
         return
       }
@@ -1570,14 +1692,77 @@ async function dispatchApi(
     }
 
     case 'GET /api/notifications': {
-      // IM-02：关注创意的阶段变更通知
+      // IM-02：关注创意的阶段变更通知（登录态缺省查自己的，v1 模式显式传 follower）
       const market = requireIdeaMarket(setup)
-      const follower = nonEmptyParam(url.searchParams.get('follower'))
+      const follower = nonEmptyParam(url.searchParams.get('follower')) ?? user?.username
       if (follower === undefined) {
         throw new OpcError('VALIDATION_ERROR', 'query parameter follower is required')
       }
       const limit = parseLimit(url.searchParams.get('limit'), 20, 100)
       sendJson(req, res, 200, { notifications: market.notificationsFor(follower, limit) })
+      return
+    }
+
+    case 'POST /api/auth/register': {
+      // 注册即登录：成功后签发会话 Cookie，前端免二次输入
+      const body = await readJsonObject(req)
+      const { users } = requireAuthStores(setup)
+      const user = users.register({
+        username: requireString(body, 'username'),
+        password: requireString(body, 'password'),
+        ...(typeof body.displayName === 'string' && body.displayName.trim().length > 0
+          ? { displayName: body.displayName }
+          : {}),
+      })
+      issueSession(setup, req, res, user.id)
+      sendJson(req, res, 200, { user })
+      return
+    }
+
+    case 'POST /api/auth/login': {
+      const body = await readJsonObject(req)
+      const { users } = requireAuthStores(setup)
+      const matched = users.verify(requireString(body, 'username'), requireString(body, 'password'))
+      if (!matched) {
+        // 统一失败延迟：钝化暴力枚举，且不泄露用户是否存在
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, AUTH_FAIL_DELAY_MS))
+        throw new OpcError('AUTH_FAILED', '用户名或密码不正确')
+      }
+      issueSession(setup, req, res, matched.id)
+      sendJson(req, res, 200, { user: matched })
+      return
+    }
+
+    case 'POST /api/auth/logout': {
+      const token = extractSessionToken(req.headers.cookie)
+      if (token) requireAuthStores(setup).sessions.revoke(token)
+      clearSessionCookie(res)
+      sendJson(req, res, 200, { ok: true })
+      return
+    }
+
+    case 'GET /api/auth/me': {
+      // 探针端点：未登录返回 200 + user:null（前端据此渲染登录页），不触发 401
+      sendJson(req, res, 200, { user: user ?? null })
+      return
+    }
+
+    case 'POST /api/teams': {
+      const body = await readJsonObject(req)
+      const owner = requireUser(user)
+      const team = requireAuthStores(setup).teams.create(owner.id, requireString(body, 'name'))
+      sendJson(req, res, 200, { team })
+      return
+    }
+
+    case 'GET /api/teams': {
+      const owner = requireUser(user)
+      const { teams, users } = requireAuthStores(setup)
+      const mine = teams.listForUser(owner.id).map((team) => ({
+        ...team,
+        members: teams.members(team.id).map((member) => enrichMember(users, member)),
+      }))
+      sendJson(req, res, 200, { teams: mine })
       return
     }
 
@@ -1678,6 +1863,47 @@ async function dispatchApi(
     }
 
     default: {
+      // 参数路由：协作团队（/api/teams/:id）
+      //   GET  队伍详情（含成员昵称）；POST members 邀请；POST members/remove 移除
+      if (path.startsWith('/api/teams/')) {
+        const owner = requireUser(user)
+        const { teams, users } = requireAuthStores(setup)
+        const segments = path.slice('/api/teams/'.length).split('/').filter((s) => s.length > 0)
+        const teamId = decodePathSegment(segments[0] ?? '', 'teamId')
+        if (segments.length === 1 && method === 'GET') {
+          const team = teams.require(teamId)
+          if (!teams.isMember(teamId, owner.id)) {
+            throw new OpcError('PERMISSION_DENIED', `team ${teamId} is not accessible to ${owner.username}`)
+          }
+          sendJson(req, res, 200, {
+            team,
+            members: teams.members(teamId).map((member) => enrichMember(users, member)),
+          })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'members' && method === 'POST') {
+          const body = await readJsonObject(req)
+          const target = users.getByUsername(requireString(body, 'username'))
+          if (!target) throw new OpcError('USER_NOT_FOUND', `user ${body.username} does not exist`)
+          const member = teams.invite(teamId, owner.id, target.id)
+          sendJson(req, res, 200, { member: enrichMember(users, member) })
+          return
+        }
+        if (
+          segments.length === 3 &&
+          decodePathSegment(segments[1], 'sub') === 'members' &&
+          decodePathSegment(segments[2], 'sub') === 'remove' &&
+          method === 'POST'
+        ) {
+          const body = await readJsonObject(req)
+          const target = users.getByUsername(requireString(body, 'username'))
+          if (!target) throw new OpcError('USER_NOT_FOUND', `user ${body.username} does not exist`)
+          teams.remove(teamId, owner.id, target.id)
+          sendJson(req, res, 200, { ok: true, removed: target.username })
+          return
+        }
+        throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+      }
       // 参数路由：创意市场（/api/market/ideas/:id）
       //   GET  详情（摘要 + 关联）；POST {follower, action?} 关注/取消关注（IM-02）
       if (path.startsWith('/api/market/ideas/')) {
@@ -1691,7 +1917,8 @@ async function dispatchApi(
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'follow' && method === 'POST') {
           const body = await readJsonObject(req)
-          const follower = requireString(body, 'follower')
+          // 登录态下关注人强制为当前用户（防冒名）；v1 无鉴权模式沿用显式 follower
+          const follower = user ? user.username : requireString(body, 'follower')
           const action = body.action === undefined ? 'follow' : requireOneOf(body, 'action', ['follow', 'unfollow'] as const)
           const result =
             action === 'unfollow' ? market.unfollow(marketIdeaId, follower) : market.follow(marketIdeaId, follower)
@@ -1710,6 +1937,9 @@ async function dispatchApi(
         const segments = path.slice('/api/ideas/'.length).split('/').filter((s) => s.length > 0)
         const ideaId = decodePathSegment(segments[0] ?? '', 'ideaId')
         const hub = setup.memoryHub
+        // 多用户越权防护：不存在 404（require），存在但不可见 403
+        if (user) requireIdeaAccess(setup, user, ideaId)
+        else store.require(ideaId)
         if (segments.length === 1) {
           if (method !== 'GET') {
             throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id is not supported`)
@@ -2010,9 +2240,12 @@ async function dispatchApi(
           const role = requireOneOf(body, 'role', COLLAB_ROLES.map((r) => r.role))
           const weight = COLLAB_ROLES.find((r) => r.role === role)?.weight ?? 10
           const tokens = body.tokens === undefined ? weight * 100 : requirePositiveInt(body, 'tokens')
+          // 登录态下贡献者强制为当前用户（防冒名）；v1 无鉴权模式沿用显式 userId
+          const collabUserId =
+            user !== undefined ? user.username : requireString(body, 'userId')
           const record = market.recordCollaboration({
             ideaId,
-            userId: requireString(body, 'userId'),
+            userId: collabUserId,
             role: role as CollabRole,
             contribution: requireString(body, 'contribution'),
             tokensGranted: tokens,

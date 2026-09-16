@@ -159,7 +159,7 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
+  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'teams', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
   const router = {
     current() {
       const m = /^#\/([a-z]+)/.exec(location.hash);
@@ -214,6 +214,7 @@
       orderRevenueNum = h('span', { class: 'funnel-num ok', text: '—' }),
       raasRevenueNum = h('span', { class: 'funnel-num ok', text: '—' }),
       ideaInput = h('input', { class: 'input', placeholder: '随时记下一个创意，如：宠物经济测评' }),
+      ideaTeamSelect = h('select', { class: 'input' }, h('option', { value: '', text: '个人创意' })),
       ideaBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '记下这个创意' }),
       runBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '运行内容流水线' }),
       recentBox = h('div'),
@@ -256,10 +257,17 @@
     }, '埋点加载失败');
 
     // 段1 创意：行内快捷录入 → POST /api/ideas → toast + 漏斗数字即时 +1 + 刷新最近创意
+    api.get('/api/teams').then(data => {
+      for (const team of (data && data.teams) || []) {
+        ideaTeamSelect.append(h('option', { value: team.id, text: `团队：${team.name}` }));
+      }
+    }).catch(() => { /* 团队缺席：仅个人 */ });
     busyBtn(ideaBtn, '记录中…', async () => {
       const text = ideaInput.value.trim();
       if (!text) return toast.err('先写下创意内容再记录');
-      const res = await api.post('/api/ideas', { text });
+      const body = { text };
+      if (ideaTeamSelect.value) body.teamId = ideaTeamSelect.value;
+      const res = await api.post('/api/ideas', body);
       toast.ok((res && res.hint) || '已记下。跑一次「出作品」，它会变成你的选题');
       ideaInput.value = '';
       if (ideasNum.textContent !== '—') ideasNum.textContent = String(Number(ideasNum.textContent) + 1);
@@ -289,7 +297,9 @@
           stage('① 记下的创意 · 选题记忆',
             numLine(ideasNum, '条创意'),
             h('div', { class: 'funnel-action' },
-              h('div', { class: 'funnel-input-row' }, ideaInput, ideaBtn))),
+              h('div', { class: 'funnel-input-row' },
+                h('div', { class: 'grow', style: 'display:flex;gap:6px;min-width:0' }, ideaInput, ideaTeamSelect),
+                ideaBtn))),
           arrow(),
           stage('② 发出的作品 · 内容流水线',
             numLine(runsNum, '次运行'),
@@ -1629,6 +1639,138 @@
   if (typeof themeMedia.addEventListener === 'function') themeMedia.addEventListener('change', onThemeChange);
   else if (typeof themeMedia.addListener === 'function') themeMedia.addListener(onThemeChange);
 
+  /* ===== 鉴权状态（多用户云操作系统） ===== */
+  let currentUser = null;
+
+  /* ===== 面板：协作团队（多用户协作组织层） ===== */
+  ROUTES.teams = async box => {
+    const nameInput = h('input', { class: 'input', placeholder: '队伍名称，如：出海小分队' });
+    const createBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '建队' });
+    const listBox = h('div');
+
+    const loadTeams = () => loadInto(listBox, null, async () => {
+      const teams = ((await api.get('/api/teams')) || {}).teams || [];
+      if (!teams.length) return ui.empty('还没有队伍——创建一支，把擅长描述、开发、运营、资产的小伙伴拉进来');
+      return h('div', { class: 'card-grid' }, teams.map(team => {
+        const isOwner = team.ownerId === (currentUser && currentUser.id);
+        const inviteInput = h('input', { class: 'input', placeholder: '按用户名邀请成员' });
+        const inviteBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '邀请' });
+        busyBtn(inviteBtn, '邀请中…', async () => {
+          const username = inviteInput.value.trim();
+          if (!username) return toast.err('先填对方用户名');
+          await api.post(`/api/teams/${team.id}/members`, { username });
+          toast.ok(`已邀请 ${username} 加入「${team.name}」`);
+          loadTeams();
+        });
+        const memberNodes = (team.members || []).map(m => h('span', { class: 'badge badge-info', style: 'margin:2px;display:inline-block' },
+          `${m.displayName || m.username || m.userId}（${m.role === 'owner' ? '队长' : '成员'}）`,
+          isOwner && m.role !== 'owner' ? h('a', { href: 'javascript:void(0)', text: ' ×', title: '移出队伍',
+            onclick: async () => {
+              await api.post(`/api/teams/${team.id}/members/remove`, { username: m.username || m.userId });
+              toast.ok('已移出队伍');
+              loadTeams();
+            } }) : null));
+        return h('div', { class: 'card memory-card' },
+          h('div', { class: 'memory-head' },
+            h('strong', { text: team.name }),
+            isOwner ? ui.badge('我创建', 'ok') : ui.badge('成员', 'info')),
+          h('div', { style: 'margin:6px 0' }, memberNodes),
+          ui.toolbar(ui.grow(ui.field('邀请成员（用户名）', inviteInput)), ui.actions(inviteBtn)));
+      }));
+    }, '团队加载失败');
+
+    busyBtn(createBtn, '创建中…', async () => {
+      const name = nameInput.value.trim();
+      if (!name) return toast.err('先起个队名');
+      await api.post('/api/teams', { name });
+      toast.ok(`队伍「${name}」已就绪，去邀请伙伴吧`);
+      nameInput.value = '';
+      loadTeams();
+    });
+
+    render(box,
+      ui.pageTitle('协作团队', '一个队伍共享一组创意：成员都能看、都能接着推进'),
+      ui.sectionCard('创建队伍', ui.toolbar(ui.grow(ui.field('队名', nameInput)), ui.actions(createBtn))),
+      ui.sectionCard('我的队伍', listBox));
+
+    await loadTeams();
+  };
+
+  /* ===== 登录页（未登录时接管主区，不启动面板路由） ===== */
+  function renderLogin() {
+    document.querySelector('.sidenav')?.classList.add('hidden');
+    const box = $('#main');
+    let mode = 'login';
+    const usernameInput = h('input', { class: 'input', autocomplete: 'username', placeholder: '2-32 位字母/数字/下划线' });
+    const passwordInput = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '至少 6 位' });
+    const displayInput = h('input', { class: 'input', placeholder: '昵称（可选）' });
+    const displayField = ui.field('昵称 displayName', displayInput);
+    displayField.classList.add('hidden');
+    const submit = h('button', { class: 'btn btn-primary', type: 'submit', text: '登录' });
+    const toggle = h('a', { href: 'javascript:void(0)', text: '还没有账号？注册一个 →' });
+    toggle.addEventListener('click', () => {
+      mode = mode === 'login' ? 'register' : 'login';
+      displayField.classList.toggle('hidden', mode === 'login');
+      submit.textContent = mode === 'login' ? '登录' : '注册并进入';
+      toggle.textContent = mode === 'login' ? '还没有账号？注册一个 →' : '已有账号？直接登录 →';
+    });
+    const form = h('form', { class: 'card section-card login-card', onsubmit: async (ev) => {
+      ev.preventDefault();
+      const original = submit.textContent;
+      submit.disabled = true;
+      submit.textContent = mode === 'login' ? '登录中…' : '注册中…';
+      try {
+        const body = { username: usernameInput.value.trim(), password: passwordInput.value };
+        if (mode === 'register' && displayInput.value.trim()) body.displayName = displayInput.value.trim();
+        const res = await fetch(API_BASE + `/api/auth/${mode}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          toast.err(`（${(data.error && data.error.code) || res.status}）${(data.error && data.error.message) || '请重试'}`);
+          return;
+        }
+        location.reload();
+      } finally {
+        submit.disabled = false;
+        submit.textContent = original;
+      }
+    } },
+      h('h2', { class: 'page-title', text: '登录 CreativeOS' }),
+      h('p', { class: 'muted', text: '每个创意者都有自己的云操作系统——创意、记忆与收入都在你的账号里。' }),
+      ui.field('用户名 username', usernameInput),
+      ui.field('密码 password', passwordInput),
+      displayField,
+      h('div', { class: 'toolbar-actions' }, submit),
+      h('p', { class: 'small', style: 'margin:10px 0 0' }, toggle));
+    render(box, h('div', { class: 'login-wrap' }, form));
+  }
+
+  async function initAuth() {
+    const badge = $('#user-badge');
+    const logoutBtn = $('#logout-btn');
+    try {
+      const res = await fetch(API_BASE + '/api/auth/me');
+      currentUser = ((await res.json()) || {}).user || null;
+    } catch {
+      currentUser = null;
+    }
+    if (currentUser) {
+      badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
+      badge.classList.remove('hidden');
+      logoutBtn.classList.remove('hidden');
+      logoutBtn.addEventListener('click', async () => {
+        await fetch(API_BASE + '/api/auth/logout', { method: 'POST' }).catch(() => {});
+        location.reload();
+      });
+      router.start();
+    } else {
+      badge.textContent = '未登录';
+      badge.classList.remove('hidden');
+      renderLogin();
+    }
+  }
+
   initHealth();
-  router.start();
+  initAuth();
 })();

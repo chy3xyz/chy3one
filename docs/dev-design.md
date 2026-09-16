@@ -265,6 +265,7 @@ ctx.inject(["webServer"], (webCtx) => {
 - **资产联动**：orders/pay 对作者为创意（authorId=创意ID）的订单自动把 85% 创作者分成入账该创意 `skill_revenue`；geo 刷新联动账本 analytics；协同按角色权重（默认 权重×100）发放 Token。
 - **签名同源**：createMarketCatalog 返回目录级 Ed25519 密钥（内存持有私钥），publish-draft 用其签名，修复"新签名包无法通过目录公钥验签安装"的断层。
 - **插件清单**：standalone 启动装载 9 插件（8 个 v1 插件 + opc-lifecycle + opc-geo-monitor；opc-console 自身 hosted/standalone 二态不在此列）。
+- **多用户云操作系统**：`core/auth`（UserStore scrypt+timingSafeEqual / SessionStore sha256 哈希落库+滑动续期 7 天 / TeamStore owner-member 两角色）+ ideas 表 owner_id/team_id 增量迁移；API 鉴权闸门（`/api/health` 与 `/api/auth/*` 匿名白名单，其余 401）；创意访问控制 403；市场关注/协同登录态强制实名。生产默认开启，`ConsoleOptions.auth=false` 仅本地兼容测试。**补齐 9.4 的 standalone 鉴权缺口**——反代仍建议做 TLS。
 - **GEO 7×24 调度**：opc-geo-monitor `refreshIntervalMs`（默认 5min，0 关闭）周期探测全部创意，防重叠/单创意失败不阻断；订阅支付自动激活权益（活跃期续订从到期时间顺延）。
 
 ### 10.4 需求编号 ↔ 测试映射（PRD v2.0）
@@ -292,6 +293,7 @@ ctx.inject(["webServer"], (webCtx) => {
 | SM-01/02/04 技能市场 v2 | console M5 集成 |
 | SM-04 订阅续费语义 | core `marketplace/subscriptions.test.ts`（激活/顺延/懒到期）、console 集成（支付激活+权益检查） |
 | 4.4 7×24 调度 | plugin `opc-geo-monitor/index.test.ts`（周期自动探测/dispose 停表/interval=0 关闭） |
+| 多用户鉴权/团队 | core `auth/auth.test.ts`（scrypt/会话/团队）、console 集成（注册登录/越权 403/团队可见性/关注防冒名） |
 | 10 NFR | core `bench/prd2-nfr.test.ts` |
 
 ### 10.5 偏差与口径说明
