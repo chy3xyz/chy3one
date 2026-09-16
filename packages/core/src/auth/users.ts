@@ -118,6 +118,44 @@ export class UserStore {
     return rows.length > 0 ? rowToUser(rows[0]) : undefined
   }
 
+  /**
+   * 修改密码：旧密码校验失败抛 AUTH_FAILED；新密码同样过长度规则。
+   * 会话全部失效由调用方执行（revokeAllForUser）——改密即全端下线。
+   */
+  updatePassword(id: string, oldPassword: string, newPassword: string): void {
+    const user = this.getById(id)
+    if (!user) throw new OpcError('USER_NOT_FOUND', `user ${id} does not exist`)
+    if (!verifyPassword(oldPassword, this.passwordHashOf(id))) {
+      throw new OpcError('AUTH_FAILED', '旧密码不正确')
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LEN) {
+      throw new OpcError('VALIDATION_ERROR', `new password must be at least ${MIN_PASSWORD_LEN} characters`)
+    }
+    this.db
+      .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(hashPassword(newPassword), id)
+  }
+
+  /** 修改昵称（展示名） */
+  updateDisplayName(id: string, displayName: string): User {
+    const trimmed = displayName.trim()
+    if (trimmed.length === 0 || trimmed.length > 32) {
+      throw new OpcError('VALIDATION_ERROR', 'displayName must be 1-32 characters')
+    }
+    const rows = this.db
+      .prepare('UPDATE users SET display_name = ? WHERE id = ? RETURNING id, username, display_name, password_hash, created_at')
+      .all(trimmed, id) as unknown as UserRow[]
+    if (rows.length === 0) throw new OpcError('USER_NOT_FOUND', `user ${id} does not exist`)
+    return rowToUser(rows[0])
+  }
+
+  private passwordHashOf(id: string): string {
+    const rows = this.db
+      .prepare('SELECT password_hash FROM users WHERE id = ?')
+      .all(id) as unknown as Array<{ password_hash: string }>
+    return rows[0]?.password_hash ?? ''
+  }
+
   count(): number {
     const rows = this.db.prepare('SELECT COUNT(*) AS n FROM users').all() as unknown as Array<{ n: number | bigint }>
     return Number(rows[0].n)

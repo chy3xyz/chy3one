@@ -1080,6 +1080,7 @@ const API_PATHS = new Set([
   '/api/guiding-questions',
   '/api/market/ideas',
   '/api/market/rankings',
+  '/api/market/follows',
   '/api/notifications',
   '/api/subscriptions',
   '/api/subscriptions/status',
@@ -1705,6 +1706,38 @@ async function dispatchApi(
       return
     }
 
+    case 'GET /api/market/follows': {
+      // IM-02："我的关注"（登录态缺省查自己的，v1 模式显式传 follower）
+      const market = requireIdeaMarket(setup)
+      const follower = nonEmptyParam(url.searchParams.get('follower')) ?? user?.username
+      if (follower === undefined) {
+        throw new OpcError('VALIDATION_ERROR', 'query parameter follower is required')
+      }
+      const limit = parseLimit(url.searchParams.get('limit'), 50, 200)
+      sendJson(req, res, 200, { follower, ideas: market.followedBy(follower, limit) })
+      return
+    }
+
+    case 'POST /api/auth/password': {
+      // 改密：旧密码校验 → 更新 → 全端会话失效（用户需重新登录）
+      const owner = requireUser(user)
+      const body = await readJsonObject(req)
+      const auth = requireAuthStores(setup)
+      auth.users.updatePassword(owner.id, requireString(body, 'oldPassword'), requireString(body, 'newPassword'))
+      auth.sessions.revokeAllForUser(owner.id)
+      clearSessionCookie(res)
+      sendJson(req, res, 200, { ok: true, hint: '密码已更新，请重新登录' })
+      return
+    }
+
+    case 'POST /api/auth/profile': {
+      const owner = requireUser(user)
+      const body = await readJsonObject(req)
+      const updated = requireAuthStores(setup).users.updateDisplayName(owner.id, requireString(body, 'displayName'))
+      sendJson(req, res, 200, { user: updated })
+      return
+    }
+
     case 'GET /api/notifications': {
       // IM-02：关注创意的阶段变更通知（登录态缺省查自己的，v1 模式显式传 follower）
       const market = requireIdeaMarket(setup)
@@ -1943,7 +1976,11 @@ async function dispatchApi(
         const marketIdeaId = decodePathSegment(segments[0] ?? '', 'ideaId')
         if (segments.length === 1 && method === 'GET') {
           const summary = market.require(marketIdeaId)
-          sendJson(req, res, 200, { summary, relations: market.relations(marketIdeaId) })
+          sendJson(req, res, 200, {
+            summary,
+            relations: market.relations(marketIdeaId),
+            collaborators: market.collaborators(marketIdeaId),
+          })
           return
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'follow' && method === 'POST') {

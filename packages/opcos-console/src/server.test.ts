@@ -1177,6 +1177,25 @@ test('console: 多用户鉴权与团队协作——注册/登录/越权 403/团�
     follower: 'someone-else',
   })
   assert.equal(follow.body.follower, 'alice', '登录态下 follower 应强制为当前用户')
+  // 我的关注反查
+  const follows = await authedFetch('alice', 'GET', 'api/market/follows')
+  assert.ok(follows.body.ideas.some((i: { ideaId: string }) => i.ideaId === teamIdea.body.idea.id))
+
+  // 用户中心：改昵称 + 改密（改密后全端下线，新密码重登）
+  const renamed = await authedFetch('alice', 'POST', 'api/auth/profile', { displayName: '爱丽丝二世' })
+  assert.equal(renamed.body.user.displayName, '爱丽丝二世')
+  const pwdChange = await authedFetch('alice', 'POST', 'api/auth/password', {
+    oldPassword: 'wrong-old', newPassword: 'new789xyz',
+  })
+  assert.equal(pwdChange.status, 401, '旧密码错误应拒绝')
+  const pwdOk = await authedFetch('alice', 'POST', 'api/auth/password', {
+    oldPassword: 'secret123', newPassword: 'new789xyz',
+  })
+  assert.equal(pwdOk.status, 200)
+  assert.equal((await authedFetch('alice', 'GET', 'api/auth/me')).body.user, null, '改密后全会话失效')
+  const relogin2 = await authedFetch('alice', 'POST', 'api/auth/login', { username: 'alice', password: 'new789xyz' })
+  assert.equal(relogin2.status, 200)
+  assert.equal((await authedFetch('alice', 'POST', 'api/auth/login', { username: 'alice', password: 'secret123' })).status, 401)
 })
 
 test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注通知/排行/协同/阶段过滤/定价/安装到创意', async (t) => {

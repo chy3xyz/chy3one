@@ -80,6 +80,30 @@ test('sessions: 令牌只存哈希（库泄露不可逆）+ cookie 解析', () =
   store.close()
 })
 
+test('users: 修改昵称与密码（改密旧密码校验 + 新密码规则）', () => {
+  const store = new UserStore(join(dir, 'users-profile.db'))
+  const user = store.register({ username: 'cara', password: 'old123456' })
+
+  // 改昵称
+  const renamed = store.updateDisplayName(user.id, '卡拉')
+  assert.equal(renamed.displayName, '卡拉')
+
+  // 改密：旧密码错误拒绝
+  assert.throws(
+    () => store.updatePassword(user.id, 'wrong-old', 'new123456'),
+    (e: { code?: string }) => e.code === 'AUTH_FAILED',
+  )
+  // 新密码过短拒绝
+  assert.throws(() => store.updatePassword(user.id, 'old123456', '12345'))
+  // 正常改密后：旧密码失效、新密码可登录
+  store.updatePassword(user.id, 'old123456', 'new123456')
+  assert.equal(store.verify('cara', 'old123456'), undefined)
+  assert.equal(store.verify('cara', 'new123456')?.id, user.id)
+  // 不存在的用户
+  assert.throws(() => store.updateDisplayName('user-none', 'x'))
+  store.close()
+})
+
 test('teams: 建队/邀请/成员/权限（owner 两角色制）', () => {
   const store = new TeamStore(join(dir, 'teams.db'))
   const team = store.create('user-owner', '创意突击队')

@@ -88,6 +88,23 @@ test('idea market: 关注 + 阶段变更通知（IM-02）', () => {
   assert.equal(market.get('idea-f')?.followers, 1)
 })
 
+test('idea market: 关注反查 followedBy（"我的关注"数据源）', () => {
+  const market = new SqliteIdeaMarket(join(dir, 'followed-by.db'))
+  market.publish(summary('idea-fb1', 'description', '问题一', '方案一'))
+  market.publish(summary('idea-fb2', 'operation', '问题二', '方案二'))
+  market.follow('idea-fb1', 'user-me')
+  market.follow('idea-fb2', 'user-me')
+  market.follow('idea-fb1', 'user-other')
+
+  const mine = market.followedBy('user-me')
+  assert.equal(mine.length, 2)
+  assert.deepEqual(mine.map((s) => s.ideaId).sort(), ['idea-fb1', 'idea-fb2'])
+  assert.equal(market.followedBy('user-none').length, 0)
+  market.unfollow('idea-fb1', 'user-me')
+  assert.equal(market.followedBy('user-me').length, 1)
+  market.close()
+})
+
 test('idea market: 关联发现重算与查询（IM-03）', () => {
   const market = new SqliteIdeaMarket(join(dir, 'relations.db'))
   market.publish(summary('idea-r1', 'description', '跨境电商卖家选品难，缺数据支撑', ''))

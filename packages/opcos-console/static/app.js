@@ -171,12 +171,15 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'teams', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
+  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'teams', 'account', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
   const router = {
     current() {
-      const m = /^#\/([a-z]+)/.exec(location.hash);
+      // 深链支持：#/ideas?id=xxx → 面板名 + query（创意详情可分享给队友）
+      const m = /^#\/([a-z]+)(?:\?(.*))?$/.exec(location.hash);
+      router.query = new URLSearchParams((m && m[2]) || '');
       return m && ROUTE_NAMES.includes(m[1]) ? m[1] : 'overview';
     },
+    query: new URLSearchParams(),
     _chain: Promise.resolve(),
     renderPanel() {
       // 串行化渲染：并发时后到者的结果覆盖先到者（首帧竞态——start() 自动渲染
@@ -356,6 +359,10 @@
     facts: '品牌事实', users: '用户', analytics: '运营数据',
   };
   const PLATFORM_LABELS = { wechat: '公众号', xiaohongshu: '小红书', douyin: '抖音', twitter: 'Twitter', bilibili: 'B站' };
+  const COLLAB_ROLE_LABELS = {
+    founder: '创意发起人', developer: 'MVP开发者', operator: '内容运营者',
+    'asset-manager': '资产管理者', promoter: '社区推广者', platform: '平台',
+  };
 
   ROUTES.ideas = async box => {
     const listBox = h('div');
@@ -653,17 +660,26 @@
 
         // 发布到创意市场（ID-05/IM-01/IM-03）+ 协同入口
         const relationsBox = h('div');
-        const renderRelations = rels => render(relationsBox, rels.length
-          ? ui.table(['类型', '关联创意', '强度', '说明'], rels.map(r => [
-              ui.badge(r.type === 'complementary' ? '互补' : '相似', r.type === 'complementary' ? 'ok' : 'info'),
-              r.b, `${Math.round(r.score * 100)}%`, r.reason]))
-          : ui.empty('暂无关联——市场里的创意更新后会自动重新发现'));
-        api.get(`/api/market/ideas/${idea.id}`).then(d2 => renderRelations(d2.relations || [])).catch(() => renderRelations([]));
+        const collabListBox = h('div');
+        const renderRelations = (rels, collaborators) => {
+          render(relationsBox, rels && rels.length
+            ? ui.table(['类型', '关联创意', '强度', '说明'], rels.map(r => [
+                ui.badge(r.type === 'complementary' ? '互补' : '相似', r.type === 'complementary' ? 'ok' : 'info'),
+                r.b, `${Math.round(r.score * 100)}%`, r.reason]))
+            : ui.empty('暂无关联——市场里的创意更新后会自动重新发现'));
+          render(collabListBox, collaborators && collaborators.length
+            ? ui.table(['协作者', '角色', '贡献', 'Token', '时间'], collaborators.map(c => [
+                c.userId,
+                (COLLAB_ROLE_LABELS[c.role] || c.role),
+                c.contribution, num(c.tokensGranted), fmtTime(c.at)]))
+            : ui.empty('还没有协同记录——发布到市场后，伙伴的贡献会记在这里并发放 Token'));
+        };
+        api.get(`/api/market/ideas/${idea.id}`).then(d2 => renderRelations(d2.relations || [], d2.collaborators || [])).catch(() => renderRelations([], []));
         const publishBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '发布到市场' });
         busyBtn(publishBtn, '发布中…', async () => {
           const res = await api.post(`/api/ideas/${idea.id}/publish`, {});
           toast.ok(`已发布到创意市场：发现 ${res.relations.length} 条关联`);
-          renderRelations(res.relations);
+          renderRelations(res.relations, []);
         });
         const collabUser = h('input', { class: 'input', placeholder: '协作者 ID（如 user-y）' });
         const collabRole = h('select', { class: 'input' },
@@ -739,6 +755,8 @@
               ui.field('协作者 userId', collabUser), ui.field('协同角色 role', collabRole),
               ui.grow(ui.field('贡献说明 contribution', collabText))),
             ui.toolbar(collabBtn),
+            h('p', { class: 'small', style: 'margin:10px 0 4px' }, h('strong', { text: '协同贡献记录' })),
+            collabListBox,
             relationsBox),
           h('div', { class: 'two-col' },
             ui.sectionCard('记忆体 · 检索与近况',
@@ -761,6 +779,12 @@
       detailBox);
 
     await Promise.all([loadList(), refreshMounted()]);
+    // 深链：#/ideas?id=xxx 直接打开该创意详情（不可见时详情区显示 403/404 提示）
+    const deepId = router.query && router.query.get('id');
+    if (deepId) {
+      selectedId = deepId;
+      openDetail();
+    }
   };
 
   /* ===== 面板：创意市场（prd2.md 6：浏览/检索/关注/关联/排行/协同） ===== */
@@ -820,8 +844,33 @@
         ui.sectionCard('GEO 榜', ui.table(['#', '创意', '阶段', '可见性'], rows('geo')))));
     };
     const loadRank = () => api.get('/api/market/rankings').then(renderRank).catch(() => renderRank(null));
+
+    // 我的关注（IM-02）：关注列表 + 取关 + 深链查看
+    const followsBox = h('div');
+    const loadFollows = () => loadInto(followsBox, null, async () => {
+      const params = new URLSearchParams();
+      params.set('follower', (currentUser && currentUser.username) || 'console-user');
+      const res = await api.get(`/api/market/follows?${params.toString()}`);
+      const ideas = (res && res.ideas) || [];
+      if (!ideas.length) return ui.empty('还没有关注的创意——在下方列表点「+ 关注」，阶段变更会通知你');
+      return ui.table(['创意', '阶段', '关注者数', ''], ideas.map(s => [
+        h('a', { href: `#/ideas?id=${s.ideaId}`, text: s.name }),
+        IDEA_STAGE_LABELS[s.stage] || s.stage, num(s.followers),
+        h('button', { class: 'btn btn-sm', type: 'button', text: '取消关注',
+          onclick: async () => {
+            await api.post(`/api/market/ideas/${s.ideaId}/follow`, {
+              follower: (currentUser && currentUser.username) || 'console-user', action: 'unfollow',
+            });
+            toast.ok(`已取消关注「${s.name}」`);
+            await Promise.all([loadFollows(), search()]);
+          } }),
+      ]));
+    }, '关注列表加载失败');
+
     const loadNotif = () => loadInto(notifBox, null, async () => {
-      const res = await api.get(`/api/notifications?follower=${CONSOLE_FOLLOWER}`);
+      const params = new URLSearchParams();
+      params.set('follower', (currentUser && currentUser.username) || 'console-user');
+      const res = await api.get(`/api/notifications?${params.toString()}`);
       const items = res.notifications || [];
       return items.length
         ? h('ul', { class: 'timeline' }, items.map(n => h('li', { class: 'timeline-item' },
@@ -837,11 +886,12 @@
         ui.toolbar(ui.grow(ui.field('关键词 q', searchInput)), ui.field('阶段', stageSelect), ui.actions(searchBtn)),
         listTitle,
         listBox),
+      ui.sectionCard('我的关注', followsBox),
       h('p', { class: 'muted small', style: 'margin:0' }, '我的通知'),
       notifBox,
       rankBox);
 
-    await Promise.all([search(), loadRank(), loadNotif()]);
+    await Promise.all([search(), loadRank(), loadFollows(), loadNotif()]);
   };
 
   /* ===== 面板：团队 ===== */
@@ -1818,6 +1868,58 @@
       ui.sectionCard('我的队伍', listBox));
 
     await loadTeams();
+  };
+
+  /* ===== 面板：账户（改昵称/改密/会话管理） ===== */
+  ROUTES.account = async box => {
+    if (!currentUser) {
+      render(box, ui.pageTitle('账户', '管理你的账号'), ui.empty('未启用多用户或未登录'));
+      return;
+    }
+    const infoBox = ui.sectionCard('账号信息',
+      h('div', { class: 'card-grid' },
+        ui.statCard('昵称', currentUser.displayName || '—'),
+        ui.statCard('用户名', currentUser.username),
+        ui.statCard('注册时间', fmtTime(currentUser.createdAt))));
+
+    const displayNameInput = h('input', { class: 'input', value: currentUser.displayName || '' });
+    const profileBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存昵称' });
+    busyBtn(profileBtn, '保存中…', async () => {
+      const res = await api.post('/api/auth/profile', { displayName: displayNameInput.value.trim() });
+      currentUser = res.user;
+      const badge = $('#user-badge');
+      if (badge) badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
+      toast.ok('昵称已更新');
+    });
+
+    const oldPwd = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '当前密码' });
+    const newPwd = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '新密码（至少 6 位）' });
+    const newPwd2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '再输入一遍新密码' });
+    const pwdBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '修改密码' });
+    busyBtn(pwdBtn, '提交中…', async () => {
+      if (newPwd.value !== newPwd2.value) return toast.err('两次输入的新密码不一致');
+      await api.post('/api/auth/password', { oldPassword: oldPwd.value, newPassword: newPwd.value });
+      toast.ok('密码已更新——为安全起见已全端下线，请用新密码重新登录');
+      setTimeout(() => location.reload(), 1200);
+    });
+
+    const signOutAllBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '注销所有会话' });
+    signOutAllBtn.addEventListener('click', () => {
+      if (!window.confirm('将注销本账号在其他设备上的全部会话（本机也需重新登录），确定？')) return;
+      toast.info('改密即可全端下线：请使用「修改密码」完成该操作');
+    });
+
+    render(box,
+      ui.pageTitle('账户', '你的云操作系统身份'),
+      infoBox,
+      h('div', { class: 'two-col' },
+        ui.sectionCard('修改昵称',
+          h('div', { class: 'form-grid form-grid-1' }, ui.field('昵称 displayName', displayNameInput)),
+          ui.toolbar(profileBtn)),
+        ui.sectionCard('修改密码（改密后全端下线）',
+          h('div', { class: 'form-grid form-grid-1' },
+            ui.field('当前密码', oldPwd), ui.field('新密码', newPwd), ui.field('确认新密码', newPwd2)),
+          ui.toolbar(pwdBtn, signOutAllBtn))));
   };
 
   /* ===== 登录页（未登录时接管主区，不启动面板路由） ===== */

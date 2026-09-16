@@ -385,6 +385,19 @@ export class SqliteIdeaMarket {
     return { followers: this.get(ideaId)?.followers ?? 0 }
   }
 
+  /** 某用户关注的创意（关注时间倒序；"我的关注"分区数据源） */
+  followedBy(follower: string, limit = 50): IdeaMarketSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.* FROM market_summaries s
+         JOIN market_follows f ON f.idea_id = s.idea_id
+         WHERE f.follower = ?
+         ORDER BY f.at DESC LIMIT ?`,
+      )
+      .all(follower, limit) as unknown as SummaryRow[]
+    return rows.map(rowToSummary)
+  }
+
   /** 阶段变更通知（IM-02：关注后收到阶段变更通知；lifecycle 迁移后调用） */
   notifyStageChange(ideaId: string, from: IdeaStage, to: IdeaStage): number {
     const followers = this.db
