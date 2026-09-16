@@ -159,7 +159,7 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'ideas', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
+  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
   const router = {
     current() {
       const m = /^#\/([a-z]+)/.exec(location.hash);
@@ -615,6 +615,39 @@
         });
         renderAsset(ldg, tk);
 
+        // 发布到创意市场（ID-05/IM-01/IM-03）+ 协同入口
+        const relationsBox = h('div');
+        const renderRelations = rels => render(relationsBox, rels.length
+          ? ui.table(['类型', '关联创意', '强度', '说明'], rels.map(r => [
+              ui.badge(r.type === 'complementary' ? '互补' : '相似', r.type === 'complementary' ? 'ok' : 'info'),
+              r.b, `${Math.round(r.score * 100)}%`, r.reason]))
+          : ui.empty('暂无关联——市场里的创意更新后会自动重新发现'));
+        api.get(`/api/market/ideas/${idea.id}`).then(d2 => renderRelations(d2.relations || [])).catch(() => renderRelations([]));
+        const publishBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '发布到市场' });
+        busyBtn(publishBtn, '发布中…', async () => {
+          const res = await api.post(`/api/ideas/${idea.id}/publish`, {});
+          toast.ok(`已发布到创意市场：发现 ${res.relations.length} 条关联`);
+          renderRelations(res.relations);
+        });
+        const collabUser = h('input', { class: 'input', placeholder: '协作者 ID（如 user-y）' });
+        const collabRole = h('select', { class: 'input' },
+          h('option', { value: 'developer', text: 'MVP开发者（20%）' }),
+          h('option', { value: 'operator', text: '内容运营者（20%）' }),
+          h('option', { value: 'promoter', text: '社区推广者（15%）' }),
+          h('option', { value: 'asset-manager', text: '资产管理者（10%）' }),
+          h('option', { value: 'founder', text: '创意发起人（25%）' }));
+        const collabText = h('input', { class: 'input', placeholder: '贡献说明，如：MVP 代码贡献' });
+        const collabBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '记协同并发 Token' });
+        busyBtn(collabBtn, '记录中…', async () => {
+          const userId = collabUser.value.trim();
+          if (!userId) return toast.err('先填协作者 ID');
+          const res = await api.post(`/api/ideas/${idea.id}/collab`, {
+            userId, role: collabRole.value, contribution: collabText.value.trim() || '协同贡献',
+          });
+          toast.ok(`已记协同贡献，发放 ${num(res.record.tokensGranted)} 积分给 ${userId}`);
+          collabUser.value = ''; collabText.value = '';
+        });
+
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
@@ -632,6 +665,14 @@
               h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
             geoBox),
           ui.sectionCard('资产与 Token（阶段四）', assetBox),
+          ui.sectionCard('创意市场与协同',
+            ui.toolbar(ui.actions(publishBtn),
+              h('span', { class: 'muted small', text: '发布摘要到市场，别人可以关注它；阶段变更会通知关注者。' })),
+            h('div', { class: 'form-grid' },
+              ui.field('协作者 userId', collabUser), ui.field('协同角色 role', collabRole),
+              ui.grow(ui.field('贡献说明 contribution', collabText))),
+            ui.toolbar(collabBtn),
+            relationsBox),
           h('div', { class: 'two-col' },
             ui.sectionCard('记忆体 · 检索与近况',
               ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
@@ -653,6 +694,87 @@
       detailBox);
 
     await Promise.all([loadList(), refreshMounted()]);
+  };
+
+  /* ===== 面板：创意市场（prd2.md 6：浏览/检索/关注/关联/排行/协同） ===== */
+  const CONSOLE_FOLLOWER = 'console-user';
+
+  ROUTES.market = async box => {
+    const searchInput = h('input', { class: 'input', placeholder: '搜创意：问题域 / 解决域 / 时空域关键词' }),
+      stageSelect = h('select', { class: 'input' },
+        h('option', { value: '', text: '全部阶段' }),
+        ...IDEA_STAGES.map(s => h('option', { value: s, text: IDEA_STAGE_LABELS[s] }))),
+      searchBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '搜创意' }),
+      listTitle = h('h3', { class: 'card-title', text: '全网创意' }),
+      listBox = h('div'),
+      rankBox = h('div'),
+      notifBox = h('div');
+
+    const renderList = ideas => render(listBox, ideas.length
+      ? h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
+          h('div', { class: 'memory-head' },
+            h('strong', { text: idea.name }),
+            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, 'info')),
+          h('p', { class: 'memory-content', text: idea.problemSummary || idea.solutionSummary || '—' }),
+          h('div', { class: 'stat-sub' },
+            `关注 ${num(idea.followers)} · 资产 ${money(idea.financeTotalCents)} · GEO ${Math.round((idea.geoVisibility || 0) * 100)}%`),
+          h('div', { class: 'toolbar-actions' },
+            h('button', {
+              class: 'btn btn-sm', type: 'button', text: '+ 关注',
+              onclick: async () => {
+                await api.post(`/api/market/ideas/${idea.ideaId}/follow`, { follower: CONSOLE_FOLLOWER });
+                toast.ok(`已关注「${idea.name}」：阶段变更会通知你`);
+                search();
+              },
+            }),
+            h('a', { class: 'btn btn-sm', href: '#/ideas', text: '去详情' })))))
+      : ui.empty('还没有发布到市场的创意——在「我的创意」详情里点「发布到市场」'));
+
+    const search = () => loadInto(listBox, '检索中…', async () => {
+      const params = new URLSearchParams();
+      const q = searchInput.value.trim();
+      if (q) params.set('q', q);
+      if (stageSelect.value) params.set('stage', stageSelect.value);
+      params.set('limit', '50');
+      const res = await api.get(`/api/market/ideas?${params.toString()}`);
+      renderList(res.ideas || []);
+      listTitle.textContent = q || stageSelect.value ? `全网创意（命中 ${res.ideas.length}）` : '全网创意';
+    }, '创意市场检索失败');
+    searchBtn.addEventListener('click', search);
+    onEnter(searchInput, search);
+    stageSelect.addEventListener('change', search);
+
+    const renderRank = data => {
+      const rows = by => (data && data[by] || []).map((s, i) => [i + 1, s.name, IDEA_STAGE_LABELS[s.stage] || s.stage,
+        by === 'assets' ? money(s.financeTotalCents) : by === 'community' ? `${num(s.followers)} 关注` : `${Math.round((s.geoVisibility || 0) * 100)}%`]);
+      render(rankBox, h('div', { class: 'three-col' },
+        ui.sectionCard('资产榜', ui.table(['#', '创意', '阶段', '收入'], rows('assets'))),
+        ui.sectionCard('社区榜', ui.table(['#', '创意', '阶段', '热度'], rows('community'))),
+        ui.sectionCard('GEO 榜', ui.table(['#', '创意', '阶段', '可见性'], rows('geo')))));
+    };
+    const loadRank = () => api.get('/api/market/rankings').then(renderRank).catch(() => renderRank(null));
+    const loadNotif = () => loadInto(notifBox, null, async () => {
+      const res = await api.get(`/api/notifications?follower=${CONSOLE_FOLLOWER}`);
+      const items = res.notifications || [];
+      return items.length
+        ? h('ul', { class: 'timeline' }, items.map(n => h('li', { class: 'timeline-item' },
+            h('div', { class: 'tl-head' }, h('code', { class: 'tl-type', text: n.ideaId }),
+              h('span', { class: 'tl-time', text: fmtTime(n.at) }))),
+            h('p', { class: 'memory-content', text: n.message })))
+        : ui.empty('暂无通知——关注创意后，阶段变更会第一时间告诉你');
+    }, '通知加载失败');
+
+    render(box,
+      ui.pageTitle('创意市场', '看别人的创意走到哪了，关注它、和它协同'),
+      ui.sectionCard(null,
+        ui.toolbar(ui.grow(ui.field('关键词 q', searchInput)), ui.field('阶段', stageSelect), ui.actions(searchBtn)),
+        listTitle,
+        listBox),
+      h('p', { class: 'muted small', style: 'margin:0' }, '我的通知'),
+      notifBox,
+      rankBox);
+
+    await Promise.all([search(), loadRank(), loadNotif()]);
   };
 
   /* ===== 面板：团队 ===== */

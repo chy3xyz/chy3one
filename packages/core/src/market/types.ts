@@ -28,6 +28,8 @@ export interface SearchQuery {
   keyword?: string
   /** category 精确匹配 */
   category?: string
+  /** 生命周期阶段过滤（prd2.md SM-01：metadata 表 stage 键；仅上架时写入 stage 的条目可命中） */
+  stage?: string
   /** 最低评分（rating >= minRating） */
   minRating?: number
   /** 本地 DSH 版本（如 '0.1.5'）：只返回 compat.dsh semver 范围满足该版本的条目 */

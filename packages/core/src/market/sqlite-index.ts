@@ -142,6 +142,11 @@ export class SqliteSkillIndex {
       where.push('category = ?')
       params.push(query.category)
     }
+    if (query.stage) {
+      // SM-01 阶段过滤：stage 存 metadata 表（上架时写入），子查询避免主表冗余列
+      where.push("id IN (SELECT skill_id FROM metadata WHERE key = 'stage' AND value = ?)")
+      params.push(query.stage)
+    }
     if (query.minRating !== undefined) {
       where.push('rating >= ?')
       params.push(query.minRating)

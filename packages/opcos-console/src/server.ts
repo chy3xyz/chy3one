@@ -24,7 +24,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import type { TelemetryEvent } from '../../dsh-adapter/src/index.js'
-import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaStore } from '../../core/src/index.js'
+import { MemoryBodyIndex, MemoryBodyHub, SqliteIdeaMarket, SqliteIdeaStore } from '../../core/src/index.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -132,9 +132,9 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const markerFile = join(dataDir, 'opcos-boot-marker.json')
   const handshake = await loadWithHandshake(ctx, entries, { quarantineFile, markerFile })
 
-  // 3. 市场索引 + 示例技能（库空时灌入；签名包仓库每次启动重建，公私钥对随启动生成）
+  // 3. 市场索引 + 示例技能（库空时灌入；签名包仓库每次启动重建，密钥对随启动生成）
   const skillsDbPath = resolve(opts.skillsDbPath ?? join(dataDir, 'skills.db'))
-  const { index, pkgStore, publicKeyPem } = createMarketCatalog(skillsDbPath)
+  const { index, pkgStore, publicKeyPem, signingKeys } = createMarketCatalog(skillsDbPath)
 
   // 4. 埋点：订阅三个 TelemetryBus（team / blackboard / skillforge），收集环形数组；
   //    content_publish 环形数组由 createApiSetup 阶段订阅 'opc.content.events' 进独立环形数组
@@ -143,10 +143,13 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
   const recentContentEvents: TelemetryEvent[] = []
 
   // 4.5 创意一等公民（prd2.md M1）：创意实体库（ideas.db + ideas/ 目录）+ 记忆体枢纽
-  //     （memory-bodies.db FTS5 检索索引 + 会话级挂载）
+  //     （memory-bodies.db FTS5 检索索引 + 会话级挂载）+ 创意市场索引（ideas-market.db）
   const ideaStore = new SqliteIdeaStore(join(dataDir, 'ideas.db'), join(dataDir, 'ideas'))
   const bodyIndex = new MemoryBodyIndex(join(dataDir, 'memory-bodies.db'))
   const memoryHub = new MemoryBodyHub(join(dataDir, 'ideas'), bodyIndex)
+  const ideaMarket = new SqliteIdeaMarket(join(dataDir, 'ideas-market.db'), {
+    marketRoot: join(dataDir, 'ideas-market'),
+  })
 
   const deps: ConsoleDeps = {
     getService: (name) => ctx.get(name),
@@ -161,6 +164,8 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     handshake,
     ideaStore,
     memoryHub,
+    ideaMarket,
+    signingKeys,
   }
   const setup = createApiSetup(deps)
 
@@ -191,6 +196,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     }
     ideaStore.close()
     bodyIndex.close()
+    ideaMarket.close()
     index.close()
   }
 

@@ -19,6 +19,7 @@ import {
   OpcError,
   SqliteIdeaStore,
   SqliteSkillIndex,
+  SqliteIdeaMarket,
   MemoryBodyHub,
   IdeaLifecycle,
   IdeaMemoryBridge,
@@ -27,6 +28,7 @@ import {
   TokenLedger,
   TOKEN_ROLES,
   TOKEN_ROLE_LABELS,
+  COLLAB_ROLES,
   MultiPlatformDispatcher,
   defaultPlatformAdapters,
   installFromMarket,
@@ -45,9 +47,11 @@ import {
   type BlackboardScope,
   type BlackboardWrite,
   type BillingEngine,
+  type CollabRole,
   type DomainKey,
   type Idea,
   type IdeaMemoryStream,
+  type IdeaMarketSummary,
   type MarketSkill,
   type MemoryEntry,
   type MemoryQuery,
@@ -56,6 +60,7 @@ import {
   type Order,
   type OrderEngine,
   type Platform,
+  type RankingKey,
   type SkillDefinition,
   type SplitEntry,
   type Task,
@@ -63,7 +68,7 @@ import {
   type WriteResult,
 } from '../../core/src/index.js'
 import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
-import { createPackage, type SkillPackage } from '../../core/src/skill/packager.js'
+import { createPackage, type Ed25519KeyPair, type SkillPackage } from '../../core/src/skill/packager.js'
 import type { TelemetryBus, TelemetryEvent } from '../../dsh-adapter/src/index.js'
 import { detectDshRuntime } from '../../dsh-adapter/src/index.js'
 import { readQuarantineList, type HandshakeReport, type HandshakeStatus } from '../../opcos-bundle/src/health.js'
@@ -410,6 +415,10 @@ export interface ConsoleDeps {
   ideaStore?: SqliteIdeaStore
   /** 创意记忆体枢纽（可选，与 ideaStore 同批构造：FTS5 检索 + 会话级挂载） */
   memoryHub?: MemoryBodyHub
+  /** 创意市场索引（可选：市场/关注/关联/排行端点依赖；缺省时相关端点 503） */
+  ideaMarket?: SqliteIdeaMarket
+  /** 目录级签名密钥（可选：publish-draft 用它签名新包，保证验签公钥同源） */
+  signingKeys?: Ed25519KeyPair
 }
 
 /** 请求处理层的就绪形态（deps 经默认值补全后的冻结视图） */
@@ -432,6 +441,10 @@ export interface ConsoleSetup {
   readonly ideaStore?: SqliteIdeaStore
   /** 创意记忆体枢纽（缺省 undefined：挂载/记忆体端点降级） */
   readonly memoryHub?: MemoryBodyHub
+  /** 创意市场索引（缺省 undefined：市场端点降级） */
+  readonly ideaMarket?: SqliteIdeaMarket
+  /** 目录级签名密钥（publish-draft 签名新包用；缺省时每次生成独立密钥） */
+  readonly signingKeys?: Ed25519KeyPair
 }
 
 /**
@@ -466,6 +479,8 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
     staticDir: deps.staticDir ?? resolveStaticDir(),
     ideaStore: deps.ideaStore,
     memoryHub: deps.memoryHub,
+    ideaMarket: deps.ideaMarket,
+    signingKeys: deps.signingKeys,
   }
 }
 
@@ -502,11 +517,14 @@ export function createMarketCatalog(skillsDbPath: string): {
   index: SqliteSkillIndex
   pkgStore: Map<string, SkillPackage>
   publicKeyPem: string
+  /** 目录级签名密钥（私钥仅内存持有）：后续上架的草案用它签名，保证与验签公钥同源 */
+  signingKeys: Ed25519KeyPair
 } {
   const index = new SqliteSkillIndex(skillsDbPath)
   const [firstSample, ...restSamples] = SAMPLE_SKILLS
   const firstBuild = createPackage(firstSample.definition, firstSample.entry.authorId)
   const publicKeyPem = firstBuild.keys.publicKeyPem
+  const signingKeys = firstBuild.keys
   const pkgStore = new Map<string, SkillPackage>([[firstSample.entry.id, firstBuild.pkg]])
   for (const sample of restSamples) {
     pkgStore.set(sample.entry.id, createPackage(sample.definition, sample.entry.authorId, firstBuild.keys).pkg)
@@ -514,7 +532,7 @@ export function createMarketCatalog(skillsDbPath: string): {
   if (index.count() === 0) {
     index.upsertAll(SAMPLE_SKILLS.map((s) => s.entry))
   }
-  return { index, pkgStore, publicKeyPem }
+  return { index, pkgStore, publicKeyPem, signingKeys }
 }
 
 /**
@@ -628,6 +646,38 @@ function requireMemoryHub(setup: ConsoleSetup): MemoryBodyHub {
     throw new OpcError('SERVICE_UNAVAILABLE', 'memory hub is not configured in console deps')
   }
   return setup.memoryHub
+}
+
+/** 创意市场索引必取 */
+function requireIdeaMarket(setup: ConsoleSetup): SqliteIdeaMarket {
+  if (!setup.ideaMarket) {
+    throw new OpcError('SERVICE_UNAVAILABLE', 'idea market is not configured in console deps')
+  }
+  return setup.ideaMarket
+}
+
+/** 由创意实体 + 资产账本构建公开摘要（IM-01：摘要、阶段、资产概况） */
+function marketSummaryFor(setup: ConsoleSetup, idea: Idea): IdeaMarketSummary {
+  let financeTotalCents = 0
+  let geoVisibility = 0
+  const home = setup.ideaStore?.homeDir(idea.id)
+  if (home) {
+    const assets = IdeaLedger.forIdeaHome(home, idea.id).read().assets
+    financeTotalCents = assets.finance.total
+    geoVisibility = assets.analytics.geo_visibility
+  }
+  return {
+    ideaId: idea.id,
+    name: idea.name,
+    stage: idea.stage,
+    problemSummary: idea.domains.problem.summary,
+    solutionSummary: idea.domains.solution.summary,
+    spacetimeSummary: idea.domains.spacetime.summary,
+    financeTotalCents,
+    geoVisibility,
+    publishedAt: Date.now(),
+    followers: 0,
+  }
 }
 
 /** 创意资产账本必取（ideas/<id>/assets/ledger.json，prd2.md 5.5） */
@@ -916,6 +966,9 @@ const API_PATHS = new Set([
   '/api/memory-bodies',
   '/api/memory-bodies/mount',
   '/api/guiding-questions',
+  '/api/market/ideas',
+  '/api/market/rankings',
+  '/api/notifications',
   '/api/funnel',
   '/api/overview',
 ])
@@ -1084,25 +1137,54 @@ async function dispatchApi(
     case 'GET /api/skills': {
       const keyword = nonEmptyParam(url.searchParams.get('q'))
       const category = nonEmptyParam(url.searchParams.get('category'))
+      const stage = nonEmptyParam(url.searchParams.get('stage'))
       const compatDsh = nonEmptyParam(url.searchParams.get('compat'))
       const limit = parseLimit(url.searchParams.get('limit'), DEFAULT_SKILL_PAGE_SIZE, MAX_SKILL_PAGE_SIZE)
       // 先取全量命中（受 TOTAL_SCAN_LIMIT 上限约束）以计算 total，再切页
-      const matched = setup.skillsIndex.search({ keyword, category, compatDsh, limit: TOTAL_SCAN_LIMIT })
-      sendJson(req, res, 200, { results: matched.slice(0, limit), total: matched.length })
+      const matched = setup.skillsIndex.search({ keyword, category, stage, compatDsh, limit: TOTAL_SCAN_LIMIT })
+      // SM-04 定价模型：metadata 里携带 pricing_model/period 的条目随结果回传
+      const results = matched.slice(0, limit).map((skill) => {
+        const pricingModel = setup.skillsIndex.getMetadata(skill.id, 'pricing_model')
+        return {
+          ...skill,
+          ...(pricingModel
+            ? { pricing: { model: pricingModel, period: setup.skillsIndex.getMetadata(skill.id, 'period') } }
+            : {}),
+        }
+      })
+      sendJson(req, res, 200, { results, total: matched.length })
       return
     }
 
     case 'POST /api/skills/install': {
       const body = await readJsonObject(req)
       const skillId = requireString(body, 'skillId')
+      // SM-02 安装到指定创意：body.ideaId → 落盘该创意目录 skills/（子操作系统内），
+      // 并写记忆体决策正本；缺省安装到全局 installed/
+      const ideaId = typeof body.ideaId === 'string' && body.ideaId.trim().length > 0 ? body.ideaId.trim() : undefined
+      let targetDir = setup.installedDir
+      if (ideaId) {
+        const store = requireIdeaStore(setup)
+        store.require(ideaId)
+        const home = store.homeDir(ideaId)
+        if (!home) throw new OpcError('SERVICE_UNAVAILABLE', 'install-to-idea requires ideas root to be configured')
+        targetDir = join(home, 'skills')
+      }
       const installedPath = await installFromMarket(
         setup.skillsIndex,
         setup.pkgStore,
         setup.publicKeyPem,
         skillId,
-        setup.installedDir,
+        targetDir,
       )
-      sendJson(req, res, 200, { installedPath })
+      if (ideaId) {
+        setup.memoryHub?.write(ideaId, 'decisions', {
+          content: `安装技能 ${skillId} 至本创意子操作系统（${installedPath}）`,
+          confidence: 0.85,
+          authority: 'user',
+        })
+      }
+      sendJson(req, res, 200, { installedPath, ...(ideaId ? { ideaId } : {}) })
       return
     }
 
@@ -1124,14 +1206,10 @@ async function dispatchApi(
         body.stage === undefined ? undefined : requireOneOf(body, 'stage', IDEA_STAGES)
       const category = typeof body.category === 'string' && body.category.trim().length > 0 ? body.category.trim() : 'community'
       const authorId = ideaId ?? (typeof body.authorId === 'string' && body.authorId.length > 0 ? body.authorId : 'console-creator')
-      // SF-04 打包信封（走 forge 路径）；再按示例 Skill 同模式重新签名取得本次公钥
+      // SF-04 打包信封（走 forge 路径）；用目录级密钥重新签名（与验签公钥同源，SM-02 可安装）
       forge.packageDraft(draft, authorId)
-      const { pkg, keys } = createPackage(
-        draft,
-        authorId,
-        undefined,
-        ideaId ? { stage, category, ideaId } : undefined,
-      )
+      const { pkg } = createPackage(draft, authorId, setup.signingKeys, ideaId ? { stage, category, ideaId } : undefined)
+      const keys = { publicKeyPem: setup.publicKeyPem }
       const entry: MarketSkill = {
         id: pkg.manifest.skillId,
         name: pkg.manifest.name,
@@ -1145,6 +1223,7 @@ async function dispatchApi(
         compat: { dsh: '>=0.1.0-rc.7' },
       }
       setup.skillsIndex.upsert(entry)
+      setup.pkgStore.set(entry.id, pkg) // 签名包入仓：后续验签安装（SM-02）必需
       if (ideaId) {
         setup.skillsIndex.setMetadata(entry.id, 'idea_id', ideaId)
         if (stage) setup.skillsIndex.setMetadata(entry.id, 'stage', stage)
@@ -1158,6 +1237,15 @@ async function dispatchApi(
           })
         }
       }
+      // SM-04 定价模型：free（直接安装）/ one_time（默认，下单购买）/ subscription（周期订阅）
+      const pricingModel =
+        body.pricingModel === undefined
+          ? 'one_time'
+          : requireOneOf(body, 'pricingModel', ['free', 'one_time', 'subscription'] as const)
+      setup.skillsIndex.setMetadata(entry.id, 'pricing_model', pricingModel)
+      if (pricingModel === 'subscription') {
+        setup.skillsIndex.setMetadata(entry.id, 'period', requireString(body, 'period'))
+      }
       sendJson(req, res, 200, {
         skillId: entry.id,
         name: entry.name,
@@ -1165,6 +1253,7 @@ async function dispatchApi(
         authorId,
         price: entry.price,
         category: entry.category,
+        pricing: { model: pricingModel, ...(pricingModel === 'subscription' ? { period: body.period } : {}) },
         publicKeyPem: keys.publicKeyPem,
       })
       return
@@ -1180,6 +1269,10 @@ async function dispatchApi(
       const body = await readJsonObject(req)
       const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
       const skillId = requireString(body, 'skillId')
+      // SM-04：免费技能无需下单——直接走 /api/skills/install 安装
+      if (setup.skillsIndex.getMetadata(skillId, 'pricing_model') === 'free') {
+        throw new OpcError('VALIDATION_ERROR', `skill ${skillId} is free: install it directly via /api/skills/install`)
+      }
       const marketEntry = setup.skillsIndex.get(skillId)
       const order = orders.createOrder({
         skillId,
@@ -1393,6 +1486,43 @@ async function dispatchApi(
       return
     }
 
+    case 'GET /api/market/ideas': {
+      // IM-01/IM-05：创意市场浏览与检索（关键词 + 阶段过滤）
+      const market = requireIdeaMarket(setup)
+      const keyword = nonEmptyParam(url.searchParams.get('q'))
+      const stage = nonEmptyParam(url.searchParams.get('stage'))
+      if (stage !== undefined && !IDEA_STAGES.includes(stage as never)) {
+        throw new OpcError('VALIDATION_ERROR', `query parameter stage must be one of: ${IDEA_STAGES.join(', ')}`)
+      }
+      const limit = parseLimit(url.searchParams.get('limit'), 20, 200)
+      sendJson(req, res, 200, { ideas: market.search({ keyword, stage: stage as Idea['stage'] | undefined, limit }) })
+      return
+    }
+
+    case 'GET /api/market/rankings': {
+      // IM-06：三类排行一次返回（资产规模 / 社区活跃 / GEO 表现）
+      const market = requireIdeaMarket(setup)
+      const limit = parseLimit(url.searchParams.get('limit'), 10, 100)
+      sendJson(req, res, 200, {
+        assets: market.ranking('assets' satisfies RankingKey, limit),
+        community: market.ranking('community' satisfies RankingKey, limit),
+        geo: market.ranking('geo' satisfies RankingKey, limit),
+      })
+      return
+    }
+
+    case 'GET /api/notifications': {
+      // IM-02：关注创意的阶段变更通知
+      const market = requireIdeaMarket(setup)
+      const follower = nonEmptyParam(url.searchParams.get('follower'))
+      if (follower === undefined) {
+        throw new OpcError('VALIDATION_ERROR', 'query parameter follower is required')
+      }
+      const limit = parseLimit(url.searchParams.get('limit'), 20, 100)
+      sendJson(req, res, 200, { notifications: market.notificationsFor(follower, limit) })
+      return
+    }
+
     case 'GET /api/guiding-questions': {
       // ID-02 三域引导问题（每域 ≥3 个）
       sendJson(req, res, 200, { questions: GUIDING_QUESTIONS })
@@ -1490,6 +1620,28 @@ async function dispatchApi(
     }
 
     default: {
+      // 参数路由：创意市场（/api/market/ideas/:id）
+      //   GET  详情（摘要 + 关联）；POST {follower, action?} 关注/取消关注（IM-02）
+      if (path.startsWith('/api/market/ideas/')) {
+        const market = requireIdeaMarket(setup)
+        const segments = path.slice('/api/market/ideas/'.length).split('/').filter((s) => s.length > 0)
+        const marketIdeaId = decodePathSegment(segments[0] ?? '', 'ideaId')
+        if (segments.length === 1 && method === 'GET') {
+          const summary = market.require(marketIdeaId)
+          sendJson(req, res, 200, { summary, relations: market.relations(marketIdeaId) })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'follow' && method === 'POST') {
+          const body = await readJsonObject(req)
+          const follower = requireString(body, 'follower')
+          const action = body.action === undefined ? 'follow' : requireOneOf(body, 'action', ['follow', 'unfollow'] as const)
+          const result =
+            action === 'unfollow' ? market.unfollow(marketIdeaId, follower) : market.follow(marketIdeaId, follower)
+          sendJson(req, res, 200, { ideaId: marketIdeaId, follower, action, followers: result.followers })
+          return
+        }
+        throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+      }
       // 参数路由：创意实体（M1 创意一等公民）
       //   GET   /api/ideas/:id           详情（实体 + 目录 + 引导问题 + 记忆体近况 + 挂载态）
       //   PATCH /api/ideas/:id/domains   三域迭代（ID-02：整域或单域，同步写记忆体正本）
@@ -1592,7 +1744,10 @@ async function dispatchApi(
           const body = await readJsonObject(req)
           const to = requireOneOf(body, 'to', IDEA_STAGES)
           const note = typeof body.note === 'string' ? body.note : undefined
-          sendJson(req, res, 200, requireLifecycle(setup).transition(ideaId, to, note))
+          const result = requireLifecycle(setup).transition(ideaId, to, note)
+          // IM-02：关注者收到阶段变更通知（市场未发布/未配置时静默跳过）
+          setup.ideaMarket?.notifyStageChange(ideaId, result.transition.from, to)
+          sendJson(req, res, 200, result)
           return
         }
         if (segments.length === 3 && decodePathSegment(segments[1], 'sub') === 'mvp') {
@@ -1736,6 +1891,51 @@ async function dispatchApi(
             authority: 'user',
           })
           sendJson(req, res, 200, { grant, stats: token.stats() })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'publish') {
+          // ID-05/IM-01：发布到创意市场（摘要 + 资产概况），发布即重算关联（IM-03）
+          if (method !== 'POST') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/publish is not supported`)
+          }
+          const market = requireIdeaMarket(setup)
+          const idea = requireIdeaStore(setup).require(ideaId)
+          const summary = marketSummaryFor(setup, idea)
+          market.publish(summary)
+          // 关联重算：新摘要入市场后，重算其自身与全市场已发布创意的关联（成对双行）
+          const relations = market.recomputeRelations(ideaId)
+          for (const other of market.list()) {
+            if (other.ideaId !== ideaId) market.recomputeRelations(other.ideaId)
+          }
+          requireMemoryHub(setup).write(ideaId, 'decisions', {
+            content: `发布到创意市场：${idea.name}（发现 ${relations.length} 条关联）`,
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, { summary, relations })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'collab') {
+          // IM-04 协同参与（prd2.md 6.4）：贡献记录 + 按 Token 积分发放（默认 权重×100）
+          if (method !== 'POST') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/collab is not supported`)
+          }
+          const body = await readJsonObject(req)
+          const market = requireIdeaMarket(setup)
+          const role = requireOneOf(body, 'role', COLLAB_ROLES.map((r) => r.role))
+          const weight = COLLAB_ROLES.find((r) => r.role === role)?.weight ?? 10
+          const tokens = body.tokens === undefined ? weight * 100 : requirePositiveInt(body, 'tokens')
+          const record = market.recordCollaboration({
+            ideaId,
+            userId: requireString(body, 'userId'),
+            role: role as CollabRole,
+            contribution: requireString(body, 'contribution'),
+            tokensGranted: tokens,
+          })
+          const tokenLedger = requireTokenLedger(setup, ideaId)
+          const grant = tokenLedger.issue(record.userId, 'collaborator', tokens, `协同贡献：${record.contribution}`)
+          requireIdeaLedger(setup, ideaId).syncTokens(tokenLedger.stats())
+          sendJson(req, res, 200, { record, grant, stats: tokenLedger.stats() })
           return
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'geo') {

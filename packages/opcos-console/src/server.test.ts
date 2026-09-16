@@ -948,6 +948,106 @@ test('console: 产品资产（M4）——.skillpkg 创意归属、订单分成�
   assert.equal(ledger3.body.ledger.assets.tokens.distributed, 40_000)
 })
 
+test('console: 创意市场与技能市场 v2（M5）——发布/关联/关注通知/排行/协同/阶段过滤/定价/安装到创意', async (t) => {
+  let getService: ((name: string) => unknown) | undefined
+  const { url } = await launch(t, {
+    onReady: (fn) => {
+      getService = fn
+    },
+  })
+  const forge = getService?.('opc.skillforge') as
+    | {
+        observe(observation: { taskSignature: string; tools: string[]; success: boolean; timestamp: number }): void
+        listDrafts(): Array<{ name: string; version: string }>
+      }
+    | undefined
+  assert.ok(forge)
+
+  // 三个创意：互补对（A 选品问题 × B 选品工具方案）+ 相似对素材（获客问题，不发布）
+  const a = (await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, {
+    text: '电商卖家选品难，缺少选品数据工具',
+  })).body.idea
+  const b = (await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, {
+    text: '帮卖家更好的卖货。我们打算做一个电商选品数据工具。',
+  })).body.idea
+  await postJson(`${url}api/ideas`, { text: '小团队获客难，获客渠道又贵又少' })
+
+  // 发布到市场（ID-05/IM-01）：发布即检索到，互补/相似关联自动发现（IM-03）
+  const pub = await postJson<{ summary: { ideaId: string }; relations: Array<{ type: string; b: string }> }>(
+    `${url}api/ideas/${a.id}/publish`, {},
+  )
+  assert.equal(pub.status, 200)
+  await postJson(`${url}api/ideas/${b.id}/publish`, {})
+  const listed = await getJson<{ ideas: Array<{ ideaId: string }> }>(`${url}api/market/ideas`)
+  assert.equal(listed.body.ideas.length, 2)
+  const search = await getJson<{ ideas: Array<{ ideaId: string }> }>(`${url}api/market/ideas?q=${encodeURIComponent('卖货')}`)
+  assert.equal(search.body.ideas.length, 1)
+  assert.equal(search.body.ideas[0]?.ideaId, b.id)
+
+  // 互补关联双向可查
+  const relA = await getJson<{ relations: Array<{ type: string; b: string }> }>(`${url}api/market/ideas/${a.id}`)
+  assert.ok(relA.body.relations.some((r) => r.type === 'complementary' && r.b === b.id))
+
+  // 关注 + 阶段变更通知（IM-02）
+  await postJson(`${url}api/market/ideas/${a.id}/follow`, { follower: 'user-1' })
+  await postJson(`${url}api/ideas/${a.id}/transition`, { to: 'product' })
+  const notif = await getJson<{ notifications: Array<{ message: string }> }>(`${url}api/notifications?follower=user-1`)
+  assert.equal(notif.body.notifications.length, 1)
+  assert.ok(notif.body.notifications[0]?.message.includes('product'))
+
+  // 排行（IM-06）
+  const rankings = await getJson<{ assets: unknown[]; community: Array<{ ideaId: string; followers: number }>; geo: unknown[] }>(
+    `${url}api/market/rankings`,
+  )
+  assert.equal(rankings.body.community[0]?.ideaId, a.id, '被关注的创意应在社区活跃榜第一')
+
+  // 协同（IM-04）：贡献记录 + collaborator 池 Token 发放（默认 权重×100）
+  const collab = await postJson<{ record: { tokensGranted: number }; grant: { role: string } }>(
+    `${url}api/ideas/${b.id}/collab`,
+    { userId: 'user-y', role: 'developer', contribution: 'MVP 代码贡献' },
+  )
+  assert.equal(collab.status, 200)
+  assert.equal(collab.body.record.tokensGranted, 2000)
+  assert.equal(collab.body.grant.role, 'collaborator')
+
+  // 技能市场 v2：蒸馏草案 → 归属创意 + stage 元数据上架（SM-01/SM-03）
+  for (let i = 0; i < 3; i++) {
+    forge.observe({
+      taskSignature: 'geo-optimize',
+      tools: ['brand_fact_check', 'schema_generator', 'geo_monitor'],
+      success: true,
+      timestamp: 1_750_000_000_000 + i,
+    })
+  }
+  const pub1 = await postJson<{ skillId: string; pricing: { model: string } }>(`${url}api/skills/publish-draft`, {
+    ideaId: b.id, stage: 'operation', category: 'GEO行销',
+  })
+  assert.equal(pub1.status, 200)
+  assert.equal(pub1.body.pricing.model, 'one_time', '缺省定价模型为一次性')
+  const skillId = pub1.body.skillId
+
+  const byStage = await getJson<{ results: Array<{ id: string }> }>(`${url}api/skills?stage=operation`)
+  assert.ok(byStage.body.results.some((s) => s.id === skillId), 'SM-01：阶段过滤命中上架技能')
+  assert.equal((await getJson<{ results: unknown[] }>(`${url}api/skills?stage=description`)).body.results.length, 0)
+
+  // SM-04：一次性定价 → 正常下单；免费技能 → 下单拒绝、直接安装（安装到创意，SM-02）
+  const order = await postJson<{ id: string }>(`${url}api/orders`, {
+    skillId, version: '1.0.0', buyerId: 'buyer-m5', amountCents: 990,
+  })
+  assert.equal(order.status, 200)
+  await postJson(`${url}api/skills/publish-draft`, { pricingModel: 'free' })
+  const freeOrder = await postJson<{ error: { code: string } }>(`${url}api/orders`, {
+    skillId, version: '1.0.0', buyerId: 'buyer-m5', amountCents: 1,
+  })
+  assert.equal(freeOrder.status, 400)
+  const installed = await postJson<{ installedPath: string; ideaId?: string }>(`${url}api/skills/install`, {
+    skillId, ideaId: b.id,
+  })
+  assert.equal(installed.status, 200)
+  assert.ok(installed.body.installedPath.includes(b.id), 'SM-02：应落盘该创意目录 skills/')
+  assert.equal(installed.body.ideaId, b.id)
+})
+
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {
   const { url } = await launch(t)
 

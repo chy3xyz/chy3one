@@ -622,6 +622,16 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
 
 .two-col .section-card { margin-bottom: 0; }
 
+.three-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 18px;
+}
+
+.three-col .section-card { margin-bottom: 0; }
+
 .result-card { margin-top: 14px; }
 
 .diff-list {
@@ -762,6 +772,8 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
   .card-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .two-col { grid-template-columns: 1fr; }
   .two-col .section-card { margin-bottom: 14px; }
+  .three-col { grid-template-columns: 1fr; }
+  .three-col .section-card { margin-bottom: 14px; }
   .funnel { flex-direction: column; }
   .funnel-arrow { align-self: center; transform: rotate(90deg); }
 }
