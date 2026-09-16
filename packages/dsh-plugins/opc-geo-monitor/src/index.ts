@@ -37,6 +37,12 @@ export interface Config {
   platforms?: GeoPlatform[]
   /** 可见性下跌告警阈值（默认 0.2） */
   alertThreshold?: number
+  /**
+   * 7×24 周期调度间隔（prd2.md 4.4「7×24 监测」/ NFR 刷新 <5min，默认 300_000ms = 5 分钟，
+   * NFR 10 允许的上限）。0 = 关闭调度（仅手动刷新）。定时对全部创意逐个探测，
+   * 单创意失败不阻断其余；上一轮未结束时跳过本轮（防重叠）。
+   */
+  refreshIntervalMs?: number
 }
 
 /** 'opc.geo' 服务契约 */
@@ -45,8 +51,13 @@ export interface GeoService {
   refresh(ideaId: string, keywords?: readonly string[]): Promise<GeoRefreshResult>
   /** 该创意的快照历史（时间倒序） */
   history(ideaId: string, limit?: number): GeoSnapshot[]
-  /** 当前生效的平台矩阵与阈值（观测用） */
-  config(): { platforms: readonly string[]; alertThreshold: number; simulated: boolean }
+  /** 当前生效的平台矩阵、阈值与调度器状态（观测用） */
+  config(): {
+    platforms: readonly string[]
+    alertThreshold: number
+    simulated: boolean
+    scheduler: { intervalMs: number; running: boolean; lastRunAt: number; lastError?: string }
+  }
 }
 
 export function apply(ctx: OpcContext, config: Config): void {
@@ -86,16 +97,62 @@ export function apply(ctx: OpcContext, config: Config): void {
       return monitor.refresh(ideaId, kws, platforms)
     },
     history: (ideaId, limit) => monitor.history(ideaId, limit),
-    config: () => ({ platforms, alertThreshold, simulated: true }),
+    config: () => ({
+      platforms,
+      alertThreshold,
+      simulated: true,
+      scheduler: schedulerStatus(),
+    }),
   }
   ctx.provideService('opc.geo', service)
 
+  /* ─────────────── 7×24 周期调度（prd2.md 4.4） ─────────────── */
+
+  const intervalMs = config.refreshIntervalMs ?? 300_000
+  let running = false
+  let lastRunAt = 0
+  let lastError: string | undefined
+  const schedulerStatus = (): { intervalMs: number; running: boolean; lastRunAt: number; lastError?: string } => ({
+    intervalMs,
+    running,
+    lastRunAt,
+    ...(lastError ? { lastError } : {}),
+  })
+
+  const refreshAll = async (): Promise<void> => {
+    if (running) return // 上一轮未结束：跳过本轮，防重叠
+    running = true
+    try {
+      for (const idea of store.list()) {
+        try {
+          await monitor.refresh(idea.id, [idea.name], platforms)
+        } catch (error) {
+          // 单创意失败（目录被清理等）不阻断其余创意的监测
+          lastError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      lastRunAt = Date.now()
+      lastError = undefined
+    } finally {
+      running = false
+    }
+  }
+
+  let timer: ReturnType<typeof setInterval> | undefined
+  if (intervalMs > 0) {
+    timer = setInterval(() => {
+      void refreshAll()
+    }, intervalMs)
+    timer.unref?.() // 不阻塞进程退出
+  }
+
   ctx.onDispose(() => {
+    if (timer) clearInterval(timer)
     geoStore.close()
     bodyIndex.close()
     store.close()
   })
 }
 
-export const plugin = defineOpcPlugin<Config>({ name, defaultConfig: {}, apply })
+export const plugin = defineOpcPlugin<Config>({ name, defaultConfig: { refreshIntervalMs: 300_000 }, apply })
 export default plugin
