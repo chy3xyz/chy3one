@@ -106,7 +106,7 @@ export function scaffoldIdeaHome(ideasRoot: string, idea: Idea): string {
           idea_id: idea.id,
           symbol: idea.id.toUpperCase().replace(/[^A-Z0-9]/g, '-'),
           total_supply: 1_000_000,
-          allocation: { community: 45, creator: 25, collaborators: 20, ecosystem: 10 },
+          allocation: { community: 45, creator: 25, collaborator: 20, ecosystem: 10 },
           distributed: 0,
           holders: 0,
           note: '社区积分凭证，非金融产品，不承诺任何回报（prd2.md R-02 合规定位）',

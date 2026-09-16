@@ -371,10 +371,12 @@
     async function openDetail() {
       if (!selectedId) { detailBox.innerHTML = ''; return; }
       await loadInto(detailBox, '加载创意详情…', async () => {
-        const [d, sg, ws] = await Promise.all([
+        const [d, sg, ws, ldg, tk] = await Promise.all([
           api.get(`/api/ideas/${selectedId}`),
           api.get(`/api/ideas/${selectedId}/mvp/suggestion`).catch(() => null),
           api.get(`/api/ideas/${selectedId}/workspace`).catch(() => null),
+          api.get(`/api/ideas/${selectedId}/ledger`).catch(() => null),
+          api.get(`/api/ideas/${selectedId}/token`).catch(() => null),
         ]);
         const idea = d.idea;
         const domains = idea.domains || {};
@@ -565,6 +567,54 @@
             : '监测完成：各平台指标已更新并沉淀到运营数据');
         });
 
+        // 资产与 Token（prd2.md 5，阶段四）：五类账本 + 积分发行
+        const assetBox = h('div');
+        const renderAsset = (ledgerData, tokenData) => {
+          if (!ledgerData) { render(assetBox, ui.empty('创意库缺席，资产账本不可用')); return; }
+          const a = ledgerData.ledger.assets;
+          render(assetBox,
+            h('div', { class: 'card-grid' },
+              ui.statCard('财务收入合计', money(a.finance.total), `作品 ${money(a.finance.product_revenue)} · 订阅 ${money(a.finance.subscription_revenue)} · Skill ${money(a.finance.skill_revenue)}`),
+              ui.statCard('Skill 沉淀', `${a.skills.length} 个`, a.skills.map(s => `${s.name}（${money(s.revenue)}）`).join(' · ') || '尚无沉淀'),
+              ui.statCard('用户资源', num(a.users.total), `30 日活跃 ${num(a.users.active_30d)} · 付费 ${num(a.users.paying)}`),
+              ui.statCard('运营数据', `${Math.round((a.analytics.geo_visibility || 0) * 100)}%`, `GEO 可见性 · 互动 ${Math.round((a.analytics.content_engagement || 0) * 100)}% · 转化 ${Math.round((a.analytics.conversion_rate || 0) * 100)}%`)),
+            tokenData ? h('div', {},
+              h('h4', { style: 'margin:12px 0 4px' }, 'Meme Token 积分 ',
+                ui.badge(`${num(tokenData.stats.distributed)} / ${num(tokenData.stats.total_supply)} 已发放 · ${num(tokenData.stats.holders)} 持有`, 'info'),
+                ui.badge('社区积分 · 非金融产品', 'muted')),
+              h('div', { class: 'form-grid' },
+                ui.field('发给谁 to', tokenToInput),
+                ui.field('角色 role', tokenRoleSelect),
+                ui.field('数量 amount', tokenAmountInput),
+                ui.field('事由 reason', tokenReasonInput)),
+              ui.toolbar(tokenIssueBtn),
+              tokenData.grants.length
+                ? ui.table(['对象', '角色', '数量', '事由', '时间'], tokenData.grants.map(g => [g.to, (tokenData.roles.find(r => r.role === g.role) || {}).label || g.role, num(g.amount), g.reason, fmtTime(g.at)]))
+                : ui.empty('还没有发放记录——测试反馈、内容贡献、协同参与都值得发一点'))
+              : null);
+        };
+        const tokenToInput = h('input', { class: 'input', placeholder: '接收人 ID（如 user-x / idea-xxx）' });
+        const tokenRoleSelect = h('select', { class: 'input' },
+          (tk && tk.roles || []).map(r => h('option', { value: r.role, text: `${r.label}（${r.role}）` })));
+        const tokenAmountInput = h('input', { class: 'input', type: 'number', min: '1', step: '1', placeholder: '积分数量' });
+        const tokenReasonInput = h('input', { class: 'input', placeholder: '事由，如：MVP 测试反馈' });
+        const tokenIssueBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '发放积分' });
+        busyBtn(tokenIssueBtn, '发放中…', async () => {
+          const to = tokenToInput.value.trim();
+          const amount = Number(tokenAmountInput.value);
+          if (!to) return toast.err('先填接收人');
+          if (!Number.isInteger(amount) || amount <= 0) return toast.err('数量需要是正整数');
+          const res = await api.post(`/api/ideas/${idea.id}/token/issue`, {
+            to, role: tokenRoleSelect.value, amount, reason: tokenReasonInput.value.trim() || '社区贡献',
+          });
+          toast.ok(`已发放 ${num(res.grant.amount)} 积分给 ${res.grant.to}`);
+          tokenToInput.value = ''; tokenAmountInput.value = ''; tokenReasonInput.value = '';
+          const [freshLdg, freshTk] = await Promise.all([
+            api.get(`/api/ideas/${idea.id}/ledger`), api.get(`/api/ideas/${idea.id}/token`)]);
+          renderAsset(freshLdg, freshTk);
+        });
+        renderAsset(ldg, tk);
+
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
@@ -581,6 +631,7 @@
             ui.toolbar(ui.actions(geoBtn),
               h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
             geoBox),
+          ui.sectionCard('资产与 Token（阶段四）', assetBox),
           h('div', { class: 'two-col' },
             ui.sectionCard('记忆体 · 检索与近况',
               ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),

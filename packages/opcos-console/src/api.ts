@@ -23,6 +23,10 @@ import {
   IdeaLifecycle,
   IdeaMemoryBridge,
   IdeaWorkspace,
+  IdeaLedger,
+  TokenLedger,
+  TOKEN_ROLES,
+  TOKEN_ROLE_LABELS,
   MultiPlatformDispatcher,
   defaultPlatformAdapters,
   installFromMarket,
@@ -279,6 +283,7 @@ const ERROR_STATUS: Record<string, number> = {
   VERSION_CONFLICT: 409,
   ORDER_STATE_INVALID: 409,
   STAGE_TRANSITION_INVALID: 409,
+  TOKEN_ALLOCATION_EXCEEDED: 409,
   NO_DRAFTS: 409,
   CONTENT_REVIEW_REJECTED: 422,
   PAYLOAD_TOO_LARGE: 413,
@@ -623,6 +628,24 @@ function requireMemoryHub(setup: ConsoleSetup): MemoryBodyHub {
     throw new OpcError('SERVICE_UNAVAILABLE', 'memory hub is not configured in console deps')
   }
   return setup.memoryHub
+}
+
+/** 创意资产账本必取（ideas/<id>/assets/ledger.json，prd2.md 5.5） */
+function requireIdeaLedger(setup: ConsoleSetup, ideaId: string): IdeaLedger {
+  const store = requireIdeaStore(setup)
+  store.require(ideaId)
+  const home = store.homeDir(ideaId)
+  if (!home) throw new OpcError('SERVICE_UNAVAILABLE', 'ledger requires ideas root to be configured')
+  return IdeaLedger.forIdeaHome(home, ideaId)
+}
+
+/** Token 积分账本必取（assets/token.json + distribution.json，R-02 积分定位） */
+function requireTokenLedger(setup: ConsoleSetup, ideaId: string): TokenLedger {
+  const store = requireIdeaStore(setup)
+  store.require(ideaId)
+  const home = store.homeDir(ideaId)
+  if (!home) throw new OpcError('SERVICE_UNAVAILABLE', 'token ledger requires ideas root to be configured')
+  return new TokenLedger(home, ideaId)
 }
 
 /** 生命周期编排器（无状态逻辑，按需组装；与 opc-lifecycle 插件共享同一 core 实现） */
@@ -1084,30 +1107,57 @@ async function dispatchApi(
     }
 
     case 'POST /api/skills/publish-draft': {
-      // 草案→上架工作流：skillforge 首个草案 → 打包 → Ed25519 重新签名取公钥 → 市场索引
+      // 草案→上架工作流：skillforge 首个草案 → 打包 → Ed25519 重新签名取公钥 → 市场索引。
+      // M4（prd2.md 7.5/5.3）：body.ideaId 指定产出创意 → .skillpkg 元数据（stage/category）
+      // + 作者记为该创意 + 创意资产账本记 Skill 沉淀。
       const body = await readJsonObject(req)
       const forge = requireService<SkillForgeService>(setup, 'opc.skillforge')
       const draft = forge.listDrafts()[0]
       if (!draft) {
         throw new OpcError('NO_DRAFTS', 'skillforge has no distilled drafts (repeat similar workflows to create one)')
       }
-      const authorId = typeof body.authorId === 'string' && body.authorId.length > 0 ? body.authorId : 'console-creator'
+      const store = setup.ideaStore
+      const ideaId =
+        typeof body.ideaId === 'string' && body.ideaId.trim().length > 0 ? body.ideaId.trim() : undefined
+      if (ideaId) requireIdeaStore(setup).require(ideaId) // 404 语义：创意必须存在
+      const stage =
+        body.stage === undefined ? undefined : requireOneOf(body, 'stage', IDEA_STAGES)
+      const category = typeof body.category === 'string' && body.category.trim().length > 0 ? body.category.trim() : 'community'
+      const authorId = ideaId ?? (typeof body.authorId === 'string' && body.authorId.length > 0 ? body.authorId : 'console-creator')
       // SF-04 打包信封（走 forge 路径）；再按示例 Skill 同模式重新签名取得本次公钥
       forge.packageDraft(draft, authorId)
-      const { pkg, keys } = createPackage(draft, authorId)
+      const { pkg, keys } = createPackage(
+        draft,
+        authorId,
+        undefined,
+        ideaId ? { stage, category, ideaId } : undefined,
+      )
       const entry: MarketSkill = {
         id: pkg.manifest.skillId,
         name: pkg.manifest.name,
         version: pkg.manifest.version,
         authorId,
         price: 990,
-        category: 'community',
+        category,
         downloads: 0,
         rating: 0,
         createdAt: pkg.manifest.createdAt,
         compat: { dsh: '>=0.1.0-rc.7' },
       }
       setup.skillsIndex.upsert(entry)
+      if (ideaId) {
+        setup.skillsIndex.setMetadata(entry.id, 'idea_id', ideaId)
+        if (stage) setup.skillsIndex.setMetadata(entry.id, 'stage', stage)
+        const home = store?.homeDir(ideaId)
+        if (home) {
+          IdeaLedger.forIdeaHome(home, ideaId).recordSkill({ id: entry.id, name: entry.name, status: 'listed' })
+          setup.memoryHub?.write(ideaId, 'decisions', {
+            content: `Skill 沉淀上架：${entry.name}（${category}${stage ? ` / ${stage}` : ''}），作者 ${authorId}`,
+            confidence: 0.85,
+            authority: 'model',
+          })
+        }
+      }
       sendJson(req, res, 200, {
         skillId: entry.id,
         name: entry.name,
@@ -1146,7 +1196,26 @@ async function dispatchApi(
       const body = await readJsonObject(req)
       const pay = requireService<MarketplacePay>(setup, 'opc.marketplace.pay')
       const { order, split } = await pay(requireString(body, 'orderId'))
-      sendJson(req, res, 200, { order, split })
+      // M4 资产联动：作者为某创意（authorId 即创意 ID）时，创作者分成（85%）入账
+      // 该创意资产账本的 skill_revenue，财务收入自动归集到创意（prd2.md 5.2）。
+      let creditedIdeaId: string | undefined
+      const authorId = order.authorId ?? setup.skillsIndex.get(order.skillId)?.authorId
+      if (authorId && setup.ideaStore?.get(authorId)) {
+        const home = setup.ideaStore.homeDir(authorId)
+        if (home) {
+          IdeaLedger.forIdeaHome(home, authorId).recordSkill({
+            id: order.skillId, name: setup.skillsIndex.get(order.skillId)?.name ?? order.skillId, status: 'listed', revenueCents: split.creator,
+          })
+          IdeaLedger.forIdeaHome(home, authorId).recordRevenue('skill', split.creator)
+          setup.memoryHub?.write(authorId, 'research', {
+            content: JSON.stringify({ kind: 'skill-revenue', skillId: order.skillId, orderId: order.id, creatorCents: split.creator }),
+            confidence: 0.8,
+            authority: 'model',
+          })
+          creditedIdeaId = authorId
+        }
+      }
+      sendJson(req, res, 200, { order, split, ...(creditedIdeaId ? { creditedIdeaId } : {}) })
       return
     }
 
@@ -1606,6 +1675,69 @@ async function dispatchApi(
           }
           throw new OpcError('NOT_FOUND', `no such path: ${path}`)
         }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'ledger') {
+          // 资产账本总览（prd2.md 5.5 五类资产）
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/ledger is not supported`)
+          }
+          sendJson(req, res, 200, { ledger: requireIdeaLedger(setup, ideaId).read() })
+          return
+        }
+        if (segments.length === 3 && decodePathSegment(segments[1], 'sub') === 'ledger') {
+          if (decodePathSegment(segments[2], 'sub') !== 'revenue' || method !== 'POST') {
+            throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+          }
+          const body = await readJsonObject(req)
+          const source = requireOneOf(body, 'source', ['product', 'subscription', 'skill'] as const)
+          const amountCents = requireNonNegativeInt(body, 'amountCents')
+          if (amountCents === 0) {
+            throw new OpcError('VALIDATION_ERROR', 'field amountCents must be a positive integer')
+          }
+          const ledger = requireIdeaLedger(setup, ideaId).recordRevenue(source, amountCents)
+          requireMemoryHub(setup).write(ideaId, 'research', {
+            content: JSON.stringify({ kind: 'revenue', source, amountCents, note: body.note ?? '' }),
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, { ledger })
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'token') {
+          // Meme Token 积分账本（prd2.md 5.4/6.5，R-02 积分定位）
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/token is not supported`)
+          }
+          const token = requireTokenLedger(setup, ideaId)
+          sendJson(req, res, 200, {
+            config: token.config(),
+            stats: token.stats(),
+            grants: token.list().slice(-50).reverse(),
+            roles: TOKEN_ROLES.map((role) => ({ role, label: TOKEN_ROLE_LABELS[role] })),
+          })
+          return
+        }
+        if (segments.length === 3 && decodePathSegment(segments[1], 'sub') === 'token') {
+          if (decodePathSegment(segments[2], 'sub') !== 'issue' || method !== 'POST') {
+            throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+          }
+          const body = await readJsonObject(req)
+          const token = requireTokenLedger(setup, ideaId)
+          const grant = token.issue(
+            requireString(body, 'to'),
+            requireOneOf(body, 'role', TOKEN_ROLES),
+            requirePositiveInt(body, 'amount'),
+            requireString(body, 'reason'),
+          )
+          // 配额/总量镜像回资产账本（单一展示源仍为 token.json）
+          requireIdeaLedger(setup, ideaId).syncTokens(token.stats())
+          requireMemoryHub(setup).write(ideaId, 'research', {
+            content: JSON.stringify({ kind: 'token-grant', ...grant }),
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, { grant, stats: token.stats() })
+          return
+        }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'geo') {
           // GEO 监测历史（prd2.md 4.4）：快照时间倒序 + 生效配置（模拟口径显式标注）
           if (method !== 'GET') {
@@ -1627,7 +1759,14 @@ async function dispatchApi(
           const keywords = Array.isArray(body.keywords)
             ? body.keywords.filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
             : undefined
-          sendJson(req, res, 200, await geo.refresh(ideaId, keywords))
+          const result = await geo.refresh(ideaId, keywords)
+          // 运营数据联动：最新一轮平均可见性写入资产账本 analytics（prd2.md 5.2 运营数据）
+          const home = setup.ideaStore?.homeDir(ideaId)
+          if (home && result.snapshots.length > 0) {
+            const avg = result.snapshots.reduce((sum, s) => sum + s.visibility, 0) / result.snapshots.length
+            IdeaLedger.forIdeaHome(home, ideaId).updateAnalytics({ geo_visibility: Math.round(avg * 100) / 100 })
+          }
+          sendJson(req, res, 200, result)
           return
         }
         throw new OpcError('NOT_FOUND', `no such path: ${path}`)

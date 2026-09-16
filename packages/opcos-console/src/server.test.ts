@@ -857,6 +857,97 @@ test('console: 内容运营升级（M3）——创意人设 run、多平台分�
   void ideaA
 })
 
+test('console: 产品资产（M4）——.skillpkg 创意归属、订单分成入账、资产账本与 Token 积分', async (t) => {
+  let getService: ((name: string) => unknown) | undefined
+  const { url } = await launch(t, {
+    onReady: (fn) => {
+      getService = fn
+    },
+  })
+
+  // 录入创意 + 蒸馏草案（同签名同工具序列成功 3 次）
+  const idea = (await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: 'GEO 行销自动化创意' })).body.idea
+  const forge = getService?.('opc.skillforge') as
+    | {
+        observe(observation: { taskSignature: string; tools: string[]; success: boolean; timestamp: number }): void
+        listDrafts(): Array<{ name: string; version: string }>
+      }
+    | undefined
+  assert.ok(forge)
+  for (let i = 0; i < 3; i++) {
+    forge.observe({
+      taskSignature: 'geo-optimize',
+      tools: ['brand_fact_check', 'schema_generator', 'geo_monitor'],
+      success: true,
+      timestamp: 1_750_000_000_000 + i,
+    })
+  }
+
+  // 归属创意上架（prd2.md 7.5）：作者记为创意 + .skillpkg 元数据 + 账本 Skill 沉淀
+  const published = await postJson<{ skillId: string; authorId: string }>(`${url}api/skills/publish-draft`, {
+    ideaId: idea.id,
+    stage: 'operation',
+    category: 'GEO行销',
+  })
+  assert.equal(published.status, 200)
+  assert.equal(published.body.authorId, idea.id, '作者应为该创意')
+  const ledger0 = await getJson<{ ledger: { assets: { skills: Array<{ id: string; status: string }> } } }>(
+    `${url}api/ideas/${idea.id}/ledger`,
+  )
+  assert.equal(ledger0.body.ledger.assets.skills[0]?.id, published.body.skillId)
+  assert.equal(ledger0.body.ledger.assets.skills[0]?.status, 'listed')
+
+  // 订单支付：创作者分成（85%）自动入账该创意（prd2.md 5.2 财务收入联动）
+  const order = await postJson<{ id: string }>(`${url}api/orders`, {
+    skillId: published.body.skillId,
+    version: '1.0.0',
+    buyerId: 'buyer-m4',
+    amountCents: 1000,
+  })
+  const paid = await postJson<{ creditedIdeaId?: string; split: { creator: number } }>(
+    `${url}api/orders/pay`, { orderId: order.body.id },
+  )
+  assert.equal(paid.status, 200)
+  assert.equal(paid.body.creditedIdeaId, idea.id)
+  assert.equal(paid.body.split.creator, 850)
+  const ledger1 = await getJson<{ ledger: { assets: { finance: { skill_revenue: number; total: number } } } }>(
+    `${url}api/ideas/${idea.id}/ledger`,
+  )
+  assert.equal(ledger1.body.ledger.assets.finance.skill_revenue, 850)
+
+  // 手动记一笔作品收入（/ledger/revenue）
+  await postJson(`${url}api/ideas/${idea.id}/ledger/revenue`, { source: 'product', amountCents: 5000 })
+  const ledger2 = await getJson<{ ledger: { assets: { finance: { total: number } } } }>(
+    `${url}api/ideas/${idea.id}/ledger`,
+  )
+  assert.equal(ledger2.body.ledger.assets.finance.total, 5850)
+
+  // Token 积分（prd2.md 5.4，R-02 积分定位）：发放 + 配额约束 + 账本镜像
+  const grant = await postJson<{ grant: { to: string; amount: number }; stats: { distributed: number } }>(
+    `${url}api/ideas/${idea.id}/token/issue`,
+    { to: 'user-x', role: 'community', amount: 40_000, reason: 'MVP 测试反馈' },
+  )
+  assert.equal(grant.status, 200)
+  assert.equal(grant.body.grant.amount, 40_000)
+  assert.equal(grant.body.stats.distributed, 40_000)
+  const badGrant = await postJson<{ error: { code: string } }>(`${url}api/ideas/${idea.id}/token/issue`, {
+    to: 'user-y', role: 'community', amount: 999_999, reason: '超配额',
+  })
+  assert.equal(badGrant.status, 409)
+  assert.equal(badGrant.body.error.code, 'TOKEN_ALLOCATION_EXCEEDED')
+  const token = await getJson<{ config: { total_supply: number; note?: string }; stats: { holders: number } }>(
+    `${url}api/ideas/${idea.id}/token`,
+  )
+  assert.equal(token.body.config.total_supply, 1_000_000)
+  assert.equal(token.body.stats.holders, 1)
+  assert.ok(token.body.config.note?.includes('不承诺'))
+  // Token 镜像已入资产账本
+  const ledger3 = await getJson<{ ledger: { assets: { tokens: { distributed: number } } } }>(
+    `${url}api/ideas/${idea.id}/ledger`,
+  )
+  assert.equal(ledger3.body.ledger.assets.tokens.distributed, 40_000)
+})
+
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {
   const { url } = await launch(t)
 

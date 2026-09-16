@@ -16,12 +16,27 @@ export interface PackageManifest {
   compat: { dsh: string }
 }
 
-/** .dshpkg 信封：manifest + 蒸馏产物 + Ed25519 签名（SF-04 / AR-S05） */
+/**
+ * .skillpkg 创意归属元数据（prd2.md 7.5，从 .dshpkg 演进）：
+ * stage=生命周期阶段、category=技能类别、compatibleIdeas=适用创意类型、
+ * ideaId=产出该 Skill 的创意（作者惯例写 `idea-<ideaId>`）。
+ * 元数据进入签名载荷，防篡改；缺省时为纯 .dshpkg 形态（向后兼容）。
+ */
+export interface SkillPkgMeta {
+  stage?: 'description' | 'product' | 'operation' | 'asset'
+  category?: string
+  compatibleIdeas?: string[]
+  ideaId?: string
+}
+
+/** .dshpkg/.skillpkg 信封：manifest + 蒸馏产物（+ 创意元数据）+ Ed25519 签名（SF-04 / AR-S05） */
 export interface SkillPackage {
   manifest: PackageManifest
   skillDefinition: SkillDefinition
-  /** base64(Ed25519 signature over canonicalJson({manifest, skillDefinition})) */
+  /** base64(Ed25519 signature over canonicalJson({manifest, skillDefinition, skillpkg?})) */
   signature: string
+  /** .skillpkg 扩展元数据（可选；prd2.md 7.5） */
+  skillpkg?: SkillPkgMeta
 }
 
 export interface Ed25519KeyPair {
@@ -38,15 +53,16 @@ function canonicalJson(value: unknown): string {
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`
 }
 
-/** 待签名载荷：manifest + skillDefinition 的规范 JSON（键排序） */
-function signingPayload(pkg: Pick<SkillPackage, 'manifest' | 'skillDefinition'>): string {
-  return canonicalJson({ manifest: pkg.manifest, skillDefinition: pkg.skillDefinition })
+/** 待签名载荷：manifest + skillDefinition（+ .skillpkg 元数据）的规范 JSON（键排序） */
+function signingPayload(pkg: Pick<SkillPackage, 'manifest' | 'skillDefinition' | 'skillpkg'>): string {
+  return canonicalJson({ manifest: pkg.manifest, skillDefinition: pkg.skillDefinition, skillpkg: pkg.skillpkg })
 }
 
 export function createPackage(
   skill: SkillDefinition,
   authorId: string,
   keyPair?: Ed25519KeyPair,
+  skillpkg?: SkillPkgMeta,
 ): { pkg: SkillPackage; keys: Ed25519KeyPair } {
   const keys: Ed25519KeyPair =
     keyPair ??
@@ -70,7 +86,12 @@ export function createPackage(
   const pkg: SkillPackage = {
     manifest,
     skillDefinition: skill,
-    signature: sign(null, Buffer.from(signingPayload({ manifest, skillDefinition: skill })), createPrivateKey(keys.privateKeyPem!)).toString('base64'),
+    ...(skillpkg ? { skillpkg } : {}),
+    signature: sign(
+      null,
+      Buffer.from(signingPayload({ manifest, skillDefinition: skill, skillpkg })),
+      createPrivateKey(keys.privateKeyPem!),
+    ).toString('base64'),
   }
   return { pkg, keys }
 }
