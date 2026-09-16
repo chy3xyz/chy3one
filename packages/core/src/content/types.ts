@@ -41,6 +41,8 @@ export interface ReviewResult {
   violations: ReviewViolation[]
   /** 合规分 0..100（扣分制，供记忆置信度与观测使用） */
   score: number
+  /** E-E-A-T 四维检查（prd2.md 4.3，advisory：扣分不改 pass 语义；GEO 就绪时携带） */
+  eeat?: import('./geo.js').EeatCheck[]
 }
 
 /** CE-05 平台适配产物：分发前最终形态 */
@@ -49,6 +51,8 @@ export interface PlatformContent {
   title: string
   htmlBody: string
   tags: string[]
+  /** Schema JSON-LD（prd2.md 4.3 策略三：结构化标记提升被生成式引擎引用概率） */
+  schemaJsonLd?: string
 }
 
 /** CE-05 分发产物 */

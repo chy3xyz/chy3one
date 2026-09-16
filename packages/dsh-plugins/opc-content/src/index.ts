@@ -54,10 +54,16 @@ export interface ContentMode {
 }
 
 export interface ContentService {
-  /** 选题 → 撰写 → 审核 → 分发 全流程（含记忆沉淀与 content_publish 埋点） */
-  run(): Promise<PipelineRunResult>
+  /**
+   * 选题 → 撰写 → 审核 → 分发 全流程（含记忆沉淀与 content_publish 埋点）。
+   * @param ideaId 指定创意时切换到该创意的记忆体人设（CO-02，需先经
+   *   setIdeaMemoryResolver 注入解析器；未注入时静默回退全局人设记忆）
+   */
+  run(ideaId?: string): Promise<PipelineRunResult>
   /** 策略替换口（真实 LLM 注入位），可单独覆盖任一环节 */
   setStrategies(overrides: StrategySet): void
+  /** 每创意人设记忆解析器注入口（CO-02；可选——旧宿主/测试可不调用） */
+  setIdeaMemoryResolver?(resolver: (ideaId: string) => MemoryStore | undefined): void
   /** 人设记忆直通（七类 MemoryCategory，与 core MemoryStore 同形） */
   readonly memory: MemoryStore
   /** 观测用：run 调用计数（含失败） */
@@ -109,13 +115,16 @@ export function apply(ctx: OpcContext, config: Config) {
 
   let runs = 0
   const service: ContentService = {
-    run() {
-      return pipeline.run().finally(() => {
+    run(ideaId?: string) {
+      return pipeline.run(ideaId).finally(() => {
         runs++
       })
     },
     setStrategies(overrides) {
       pipeline.setStrategies(overrides)
+    },
+    setIdeaMemoryResolver(resolver) {
+      pipeline.setIdeaMemoryResolver(resolver)
     },
     memory,
     stats: () => ({ runs }),

@@ -66,7 +66,9 @@ test('pipeline: happy path — 候选≥5、发布成功、content_publish 埋�
   const facts = memory.query({ category: 'fact' })
   assert.equal(facts.length, 1)
   assert.ok(facts[0].content.includes(result.draft.title))
-  assert.equal(facts[0].confidence, 1) // 审核分 100 → 置信度封顶
+  // 审核分（100 - E-E-A-T advisory 扣分，prd2.md 4.3）→ 置信度 min(1, score/100)
+  assert.equal(facts[0].confidence, Math.min(1, result.review.score / 100))
+  assert.ok(Array.isArray(result.review.eeat) && result.review.eeat.length === 4)
 })
 
 test('pipeline: 审核不通过 — 带 violations 重写 2 轮后抛 CONTENT_REVIEW_REJECTED 且 lesson 落库 (CE-04)', async () => {

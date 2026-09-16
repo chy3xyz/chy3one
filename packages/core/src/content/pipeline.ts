@@ -12,6 +12,7 @@
 import { appendFileSync } from 'node:fs'
 import { OpcError } from '../errors.js'
 import type { MemoryStore } from '../memory/memory.js'
+import { buildSchemaJsonLd, checkEeat, withEeat } from './geo.js'
 import {
   MockWechatAdapter,
   RuleReviewStrategy,
@@ -52,11 +53,18 @@ export interface PipelineRunResult {
   durationMs: number
   /** 全链路成功 = 已过审且发布成功 */
   success: boolean
+  /** 指定创意时携带（CO-02 每创意人设隔离运行） */
+  ideaId?: string
 }
 
 export interface ContentPipelineOptions {
   /** 七类人设记忆（soul/user/project/fact/lesson/topic/rules），直接复用 MemoryStore */
   memory: MemoryStore
+  /**
+   * 每创意人设记忆解析器（CO-02，prd2.md 4.2 人设记忆独立性）：
+   * run(ideaId) 时经此取该创意的记忆体视图；未配置或返回 undefined 回退全局 memory。
+   */
+  ideaMemoryResolver?: (ideaId: string) => MemoryStore | undefined
   /** 'content_publish' 埋点出口（PRD 7.5） */
   telemetry?: ContentTelemetry
   /** 可选：每次 run 结果追加落盘（JSONL，一行一条） */
@@ -116,22 +124,33 @@ export class ContentPipeline {
     if (overrides.publishAdapter) this.publishAdapter = overrides.publishAdapter
   }
 
-  /** 选题 → 撰写 → 审核（重写≤2轮）→ 分发 → 记忆沉淀 → 埋点 → 落盘 */
-  async run(): Promise<PipelineRunResult> {
+  /** 运行期注入每创意人设记忆解析器（CO-02；undefined 移除，回退全局记忆） */
+  setIdeaMemoryResolver(resolver: ((ideaId: string) => MemoryStore | undefined) | undefined): void {
+    this.options.ideaMemoryResolver = resolver
+  }
+
+  /**
+   * 选题 → 撰写 → 审核（重写≤2轮）→ 分发 → 记忆沉淀 → 埋点 → 落盘。
+   * @param ideaId 指定创意时经 ideaMemoryResolver 切换到该创意的记忆体
+   *   （CO-02：人设/选题/沉淀全部隔离在该创意记忆体内），缺席回退全局人设记忆。
+   */
+  async run(ideaId?: string): Promise<PipelineRunResult> {
     const startedAt = Date.now()
-    const memory = this.options.memory
+    const memory =
+      (ideaId !== undefined ? this.options.ideaMemoryResolver?.(ideaId) : undefined) ?? this.options.memory
 
     // CE-01 选题
     const brief = await this.topicStrategy.pick(memory)
 
-    // CE-03 撰写 + CE-04 审核（检出违规 → 带 violations 重写，最多 2 轮）
+    // CE-03 撰写 + CE-04 审核（检出违规 → 带 violations 重写，最多 2 轮）；
+    // 每轮并入 E-E-A-T 四维检查（prd2.md 4.3：扣分 advisory，不改 pass 语义）
     let draft = await this.writeStrategy.write(brief, memory)
-    let review = await this.reviewStrategy.review(draft)
+    let review = await this.review(draft)
     let rewrites = 0
     while (!review.pass && rewrites < MAX_REWRITE_ROUNDS) {
       rewrites++
       draft = await this.writeStrategy.write(brief, memory, review)
-      review = await this.reviewStrategy.review(draft)
+      review = await this.review(draft)
     }
     if (!review.pass) {
       // lesson：失败教训落库（记忆表更新触发条件：被拒原因）
@@ -148,8 +167,11 @@ export class ContentPipeline {
       )
     }
 
-    // CE-05 适配 + 分发（限流指数退避，最多 3 次尝试）
-    const content = toPlatformContent(draft, brief)
+    // CE-05 适配 + 分发（限流指数退避，最多 3 次尝试）；Schema JSON-LD 随内容分发（GEO 策略三）
+    const content: PlatformContent = {
+      ...toPlatformContent(draft, brief),
+      schemaJsonLd: buildSchemaJsonLd(draft, brief),
+    }
     const publish = await this.publishWithRetry(content)
 
     // fact：发布成功特征落库（记忆表更新触发条件：每次内容发布后）
@@ -170,9 +192,10 @@ export class ContentPipeline {
       expansions: expansionsOf(this.writeStrategy),
       durationMs: Date.now() - startedAt,
       success: publish.success,
+      ...(ideaId !== undefined ? { ideaId } : {}),
     }
 
-    // PRD 7.5 content_publish：platform, content_type, duration（+title 便于归因）
+    // PRD 7.5 content_publish：platform, content_type, duration（+title/ideaId 便于归因）
     this.options.telemetry?.emit({
       type: 'content_publish',
       payload: {
@@ -180,12 +203,19 @@ export class ContentPipeline {
         title: draft.title,
         content_type: 'article',
         durationMs: result.durationMs,
+        ...(ideaId !== undefined ? { ideaId } : {}),
       },
       timestamp: Date.now(),
     })
 
     this.appendRun(result)
     return result
+  }
+
+  /** 审核策略 + E-E-A-T 四维检查合并（GEO 策略一；advisory 扣分不改 pass） */
+  private async review(draft: Draft): Promise<ReviewResult> {
+    const base = await this.reviewStrategy.review(draft)
+    return withEeat(base, checkEeat(draft))
   }
 
   /** PRD 6.3.4：分发平台 API 限流 → 指数退避重试，最多 3 次尝试 */

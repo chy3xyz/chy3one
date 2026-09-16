@@ -333,6 +333,7 @@
     description: '描述', decisions: '决策', research: '调研', 'model-notes': '模型笔记',
     facts: '品牌事实', users: '用户', analytics: '运营数据',
   };
+  const PLATFORM_LABELS = { wechat: '公众号', xiaohongshu: '小红书', douyin: '抖音', twitter: 'Twitter', bilibili: 'B站' };
 
   ROUTES.ideas = async box => {
     const listBox = h('div');
@@ -533,6 +534,37 @@
           await Promise.all([openDetail(), refreshMounted()]);
         });
 
+        // GEO 监测（prd2.md 4.4，阶段三）：刷新 + 平台快照 + 下跌告警
+        const geoBox = h('div');
+        const renderGeo = data => {
+          const history = (data && data.history) || [];
+          const byPlatform = {};
+          for (const s of history) byPlatform[s.platform] = s; // 时间倒序 → 每平台保留最新
+          const rows = Object.entries(byPlatform).map(([platform, s]) => [
+            PLATFORM_LABELS[platform] || platform,
+            `${Math.round(s.visibility * 100)}%`,
+            `${Math.round(s.citationRate * 100)}%`,
+            `${Math.round(s.sentiment * 100)}分`,
+            fmtTime(s.at),
+          ]);
+          render(geoBox,
+            ui.table(['平台', '可见性', '引用率', '情感', '采集时间'], rows),
+            h('p', { class: 'muted small', style: 'margin:6px 0 0',
+              text: data && data.config
+                ? `监测平台：${data.config.platforms.join(' / ')} · 告警阈值：可见性下跌 ${Math.round(data.config.alertThreshold * 100)}% · 当前为模拟口径数据（主流 AI 平台无公开可见性 API）`
+                : '' }));
+        };
+        api.get(`/api/ideas/${idea.id}/geo`).then(renderGeo).catch(() => renderGeo(null));
+        const geoBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '刷新监测' });
+        busyBtn(geoBtn, '监测中…', async () => {
+          const res = await api.post(`/api/ideas/${idea.id}/geo/refresh`, {});
+          const fresh = await api.get(`/api/ideas/${idea.id}/geo`);
+          renderGeo(fresh);
+          toast.ok(res.alerts && res.alerts.length
+            ? `监测完成：${res.alerts.length} 个平台可见性下跌告警`
+            : '监测完成：各平台指标已更新并沉淀到运营数据');
+        });
+
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
@@ -545,6 +577,10 @@
               h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
             mvpBox,
             ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
+          ui.sectionCard('GEO 监测（阶段三）',
+            ui.toolbar(ui.actions(geoBtn),
+              h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
+            geoBox),
           h('div', { class: 'two-col' },
             ui.sectionCard('记忆体 · 检索与近况',
               ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
@@ -1147,14 +1183,22 @@
   ROUTES.content = async box => {
     let publishedCount = 0; // 最近 content_publish 事件数（「第 n 份作品」toast 计数用，renderEvents 刷新）
     const runBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '马上出作品' }),
+      ideaSelect = h('select', { class: 'input' }, h('option', { value: '', text: '全局人设（不指定创意）' })),
       resultBox = h('div'),
       eventsBox = h('div'),
       statsBox = h('div');
+    // 创意选择器（CO-02：按创意人设出作品）
+    api.get('/api/ideas').then(data => {
+      for (const idea of (data && data.ideas) || []) {
+        ideaSelect.append(h('option', { value: idea.id, text: `${idea.name}（${IDEA_STAGE_LABELS[idea.stage] || idea.stage}）` }));
+      }
+    }).catch(() => { /* 创意库缺席：保留全局选项 */ });
     const renderResult = r => {
       const brief = (r && r.brief) || {},
         review = (r && r.review) || {},
         publish = (r && r.publish) || {},
-        violations = review.violations || [];
+        violations = review.violations || [],
+        dispatch = r && r.dispatch;
       render(resultBox, h('div', { class: 'card section-card result-card' },
         h('h3', { class: 'card-title' }, '流水线结果 ',
           r && r.success ? ui.badge('发布成功', 'ok') : ui.badge('未发布', 'err')),
@@ -1169,19 +1213,25 @@
           ? h('div', { class: 'violation-list' }, violations.map(v => h('div', { class: 'violation-item' },
               ui.badge(String(v.severity || 'low'), v.severity === 'high' ? 'err' : 'warn'),
               h('span', { text: `${v.type}：${v.detail || ''}` }))))
-          : h('p', { class: 'ok-text', style: 'margin:8px 0', text: `审核通过 · 合规分 ${num(review.score)} / 100` }),
+          : h('p', { class: 'ok-text', style: 'margin:8px 0', text: `审核通过 · 合规分 ${num(review.score)} / 100 · E-E-A-T 四维检查 ${Array.isArray(review.eeat) ? review.eeat.filter(x => x.present).length + '/4 达标' : '未启用'}` }),
         publish.url
           ? h('p', { class: 'result-line' }, '发布链接：',
               h('a', { href: publish.url, target: '_blank', rel: 'noopener noreferrer', text: publish.url }))
           : null,
+        dispatch ? h('div', {},
+          h('h4', { text: `多平台分发（${dispatch.dispatches.length} 平台 · 成功 ${dispatch.dispatches.filter(d => d.result.success).length}）` }),
+          h('ul', { class: 'muted small' }, dispatch.dispatches.map(d => h('li', {},
+            h('strong', { text: PLATFORM_LABELS[d.platform] || d.platform }), ` · 适配 ${d.adaptationMs}ms · `,
+            h('a', { href: d.result.url, target: '_blank', rel: 'noopener noreferrer', text: d.result.success ? '回执链接' : '失败' }))))) : null,
         h('p', { class: 'muted small', style: 'margin:6px 0 0',
-          text: `耗时 ${num(r && r.durationMs)} ms · 重写 ${num(r && r.rewrites)} 轮 · 平台 ${publish.platform || '—'}` })));
+          text: `耗时 ${num(r && r.durationMs)} ms · 重写 ${num(r && r.rewrites)} 轮 · 平台 ${publish.platform || '—'}${r && r.ideaId ? ` · 创意 ${r.ideaId}` : ''}` })));
     };
     busyBtn(runBtn, '运行中…（LLM 模式可能需要数秒）', async () => {
-      const r = await api.post('/api/content/run', {});
+      const ideaId = ideaSelect.value || undefined;
+      const r = await api.post('/api/content/run', { ideaId, platforms: true });
       renderResult(r);
       toast.ok(r && r.publish && r.publish.url
-        ? `第 ${publishedCount + 1} 份作品发布成功 · 合规分 ${num(r && r.review && r.review.score)}`
+        ? `第 ${publishedCount + 1} 份作品发布成功 · 已适配 ${r.dispatch ? r.dispatch.dispatches.length : 1} 个平台`
         : '流水线已运行（本次未发布）');
       quiet();
     });
@@ -1217,8 +1267,8 @@
     render(box,
       ui.pageTitle('出作品', '把创意变成能发布、能涨粉的作品'),
       ui.sectionCard('运行流水线',
-        ui.toolbar(ui.actions(runBtn),
-          h('span', { class: 'muted small', text: '默认模板策略秒级返回；配置 DeepSeek API Key 后走 LLM 撰写 + 热点分析。' })),
+        ui.toolbar(ui.field('用哪个创意的人设（CO-02）', ideaSelect), ui.actions(runBtn),
+          h('span', { class: 'muted small', text: '指定创意则用该创意记忆体的人设与选题；默认五平台分发（CO-03）。配置 DeepSeek API Key 后走 LLM 撰写。' })),
         resultBox),
       h('div', { class: 'two-col' },
         ui.sectionCard('最近发布事件（10s 自动刷新）', eventsBox),

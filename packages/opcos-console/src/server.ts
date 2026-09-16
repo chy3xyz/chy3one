@@ -33,6 +33,7 @@ import {
 import { plugin as billingPlugin } from '../../dsh-plugins/opc-billing/src/index.js'
 import { plugin as blackboardPlugin } from '../../dsh-plugins/opc-blackboard/src/index.js'
 import { plugin as contentPlugin } from '../../dsh-plugins/opc-content/src/index.js'
+import { plugin as geoMonitorPlugin } from '../../dsh-plugins/opc-geo-monitor/src/index.js'
 import { plugin as lifecyclePlugin } from '../../dsh-plugins/opc-lifecycle/src/index.js'
 import { plugin as marketplacePlugin } from '../../dsh-plugins/opc-marketplace/src/index.js'
 import { plugin as memoryPlugin } from '../../dsh-plugins/opc-memory/src/index.js'
@@ -113,6 +114,17 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
         ideasDbPath: join(dataDir, 'ideas.db'),
         ideasRoot: join(dataDir, 'ideas'),
         bodiesDbPath: join(dataDir, 'memory-bodies.db'),
+      },
+    },
+    {
+      // GEO 监测（prd2.md 4.4）：7×24 平台可见性/引用/情感监测 + 下跌告警，
+      // 快照正本写入创意记忆体 analytics 流；默认 Mock 探测源（UI 标注模拟口径）
+      plugin: geoMonitorPlugin,
+      config: {
+        ideasDbPath: join(dataDir, 'ideas.db'),
+        ideasRoot: join(dataDir, 'ideas'),
+        bodiesDbPath: join(dataDir, 'memory-bodies.db'),
+        geoDbPath: join(dataDir, 'geo.db'),
       },
     },
   ]

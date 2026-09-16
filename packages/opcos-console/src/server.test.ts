@@ -81,6 +81,7 @@ test('console: /api/health 全插件握手 + /api/overview 聚合 + 静态占位
       'opc-billing',
       'opc-blackboard',
       'opc-content',
+      'opc-geo-monitor',
       'opc-lifecycle',
       'opc-marketplace',
       'opc-memory',
@@ -798,6 +799,62 @@ test('console: 生命周期/MVP/工作区端点（M2）——迁移409、MVP方�
     `${url}api/ideas/${idea.id}/workspace/file?path=ghost.txt`,
   )
   assert.equal(missing.status, 404)
+})
+
+test('console: 内容运营升级（M3）——创意人设 run、多平台分发、GEO 监测', async (t) => {
+  const { url } = await launch(t)
+  const a = await postJson<{ idea: IdeaEntity }>(`${url}api/ideas`, { text: 'AI 建站工具选购指南' })
+  const ideaA = a.body.idea
+
+  // 指定创意 run（CO-02）：选题落题为该创意记忆体中的描述，E-E-A-T 与 Schema 随行
+  const run = await postJson<{
+    ideaId?: string
+    brief: { title: string }
+    review: { eeat?: unknown[] }
+    content: { schemaJsonLd?: string }
+    dispatch?: { dispatches: Array<{ platform: string; result: { success: boolean } }>; success: boolean }
+  }>(`${url}api/content/run`, { ideaId: ideaA.id, platforms: ['wechat', 'twitter'] })
+  assert.equal(run.status, 200)
+  assert.equal(run.body.ideaId, ideaA.id)
+  assert.equal(run.body.brief.title, 'AI 建站工具选购指南')
+  assert.ok(Array.isArray(run.body.review.eeat), 'E-E-A-T 检查应随审核结果携带')
+  assert.ok(run.body.content.schemaJsonLd?.includes('schema.org'), 'Schema 标记随内容生成')
+  assert.equal(run.body.dispatch?.dispatches.length, 2)
+  assert.equal(run.body.dispatch?.success, true)
+
+  // 缺省全平台（CO-03 五平台矩阵）
+  const runAll = await postJson<{ dispatch?: { dispatches: Array<{ platform: string }> } }>(
+    `${url}api/content/run`, {},
+  )
+  assert.equal(runAll.status, 200)
+  assert.equal(runAll.body.dispatch?.dispatches.length, 5)
+
+  // platforms 非法值 400
+  const badPlatforms = await postJson<{ error: { code: string } }>(`${url}api/content/run`, {
+    platforms: ['mastodon'],
+  })
+  assert.equal(badPlatforms.status, 400)
+
+  // GEO 监测（prd2.md 4.4）：刷新落库 + 写记忆体 analytics 流 + 历史/配置
+  const refresh = await postJson<{
+    snapshots: Array<{ platform: string; visibility: number }>
+    alerts: unknown[]
+    simulated: boolean
+  }>(`${url}api/ideas/${ideaA.id}/geo/refresh`, {})
+  assert.equal(refresh.status, 200)
+  assert.equal(refresh.body.snapshots.length, 4, '默认四平台矩阵')
+  assert.equal(refresh.body.simulated, true, '模拟口径显式标注')
+  const geo = await getJson<{
+    history: Array<{ platform: string; ideaId?: string }>
+    config: { platforms: string[]; alertThreshold: number }
+  }>(`${url}api/ideas/${ideaA.id}/geo`)
+  assert.equal(geo.body.history.length, 4)
+  assert.equal(geo.body.config.alertThreshold, 0.2)
+  const analytics = await getJson<{ entries: Array<{ stream: string; content: string }> }>(
+    `${url}api/ideas/${ideaA.id}/entries?stream=analytics`,
+  )
+  assert.ok(analytics.body.entries.some((e) => e.content.includes('geo-snapshot')), '快照正本写入 analytics 流')
+  void ideaA
 })
 
 test('console: 创意变现漏斗全链 —— 创意→内容通路（topic 直连选题）+ run/订单/计费预置后四段计数', async (t) => {

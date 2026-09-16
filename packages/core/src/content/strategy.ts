@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { OpcError } from '../errors.js'
 import type { MemoryEntry, MemoryStore } from '../memory/memory.js'
+import { STRUCTURED_CONTENT_BOOST, isStructuredTopic } from './geo.js'
 import { hotSourceRef } from './web-topic.js'
 import type { Brief, Draft, PlatformContent, PublishResult, ReviewResult, ReviewViolation } from './types.js'
 
@@ -80,7 +81,7 @@ export class TemplateTopicStrategy implements TopicStrategy {
    */
   constructor(private readonly topicSource?: HotTopicSource) {}
 
-  /** 生成全部候选（≥5，CE-01）；暴露给测试与上层观测 */
+  /** 生成全部候选（≥5，CE-01）；结构化知识内容（FAQ/指南/对比…）加权（GEO 策略二）；暴露给测试与上层观测 */
   generateCandidates(memory: MemoryStore): TopicCandidate[] {
     const topics = memory.query({ category: 'topic', limit: 5 })
     const soul = memory.query({ category: 'soul', limit: 1 })
@@ -107,6 +108,12 @@ export class TemplateTopicStrategy implements TopicStrategy {
         sources: ['builtin://evergreen-topics'],
         source: 'builtin',
       })
+    }
+    // GEO 策略二：结构化知识内容选题加权（可直接回答问题的内容更易被生成式引擎引用）
+    for (const candidate of candidates) {
+      if (isStructuredTopic(candidate)) {
+        candidate.personaScore = Math.min(5, round1(candidate.personaScore + STRUCTURED_CONTENT_BOOST))
+      }
     }
     return candidates
   }

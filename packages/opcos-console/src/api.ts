@@ -21,11 +21,15 @@ import {
   SqliteSkillIndex,
   MemoryBodyHub,
   IdeaLifecycle,
+  IdeaMemoryBridge,
   IdeaWorkspace,
+  MultiPlatformDispatcher,
+  defaultPlatformAdapters,
   installFromMarket,
   planMvp,
   suggestGoNoGo,
   workspacePathFor,
+  PLATFORMS,
   GUIDING_QUESTIONS,
   DOMAIN_KEYS,
   DOMAIN_LABELS,
@@ -47,6 +51,7 @@ import {
   type NewMemoryEntry,
   type Order,
   type OrderEngine,
+  type Platform,
   type SkillDefinition,
   type SplitEntry,
   type Task,
@@ -107,10 +112,13 @@ interface RevenueLedger {
   listEntries(): readonly SplitEntry[]
 }
 
-/** Content Engine 服务（opc.content 的结构子集，PRD 6.3 系统三） */
+/** Content Engine 服务（opc.content 的结构子集，PRD 6.3 系统三 + prd2.md M3） */
 interface ContentService {
-  /** 选题 → 撰写 → 审核 → 分发 全流程（LLM 模式下可能耗时数秒） */
-  run(): Promise<PipelineRunResult>
+  /**
+   * 选题 → 撰写 → 审核 → 分发 全流程（LLM 模式下可能耗时数秒）。
+   * ideaId 指定创意时切换到该创意记忆体人设（CO-02，需 setIdeaMemoryResolver 先注入）。
+   */
+  run(ideaId?: string): Promise<PipelineRunResult>
   /** 观测用：run 调用计数（含失败） */
   stats(): { runs: number }
   /** 生效模式（不回传任何密钥） */
@@ -121,6 +129,22 @@ interface ContentService {
    * 直连为选题候选（core content/strategy.ts）——创意→内容通路的桥接写入口。
    */
   readonly memory: MemoryService
+  /** 每创意人设记忆解析器注入口（CO-02，插件缺席/旧版本时可选） */
+  setIdeaMemoryResolver?(resolver: (ideaId: string) => unknown): void
+}
+
+/** GEO 监测服务（opc.geo 的结构子集，prd2.md 4.4） */
+interface GeoService {
+  refresh(ideaId: string, keywords?: readonly string[]): Promise<{
+    ideaId: string
+    snapshots: Array<{ platform: string; visibility: number; citationRate: number; sentiment: number; at: number }>
+    alerts: Array<{ platform: string; drop: number; previous: number; value: number; threshold: number }>
+    simulated: boolean
+  }>
+  history(ideaId: string, limit?: number): Array<{
+    platform: string; visibility: number; citationRate: number; sentiment: number; at: number
+  }>
+  config(): { platforms: readonly string[]; alertThreshold: number; simulated: boolean }
 }
 
 /** 共享任务板服务（opc.team.board 的结构子集，core TaskBoard 同形，AS-04） */
@@ -606,6 +630,20 @@ function requireLifecycle(setup: ConsoleSetup): IdeaLifecycle {
   return new IdeaLifecycle(requireIdeaStore(setup), setup.memoryHub ?? undefined)
 }
 
+/**
+ * 把"创意记忆体 → 人设记忆"解析器注给 Content Engine（CO-02 幂等接线）：
+ * run(ideaId) 时选题/人设/沉淀全部落到该创意的记忆体；插件缺席（隔离）或
+ * 创意不存在时静默回退全局人设记忆，run 本身不失败。
+ */
+function wireIdeaMemory(setup: ConsoleSetup, content: ContentService): void {
+  if (!setup.ideaStore || !setup.memoryHub) return
+  if (typeof content.setIdeaMemoryResolver !== 'function') return
+  content.setIdeaMemoryResolver((ideaId: string) => {
+    if (!setup.ideaStore?.get(ideaId)) return undefined
+    return new IdeaMemoryBridge(setup.memoryHub!, ideaId)
+  })
+}
+
 /** 从 research 流正本回读 MVP 验证记录（kind=mvp-validation 的结构化 JSON 条目） */
 function listValidations(hub: MemoryBodyHub, ideaId: string): MvpValidation[] {
   return hub
@@ -984,9 +1022,27 @@ async function dispatchApi(
     }
 
     case 'POST /api/content/run': {
-      // 选题→撰写→审核→分发全链路（LLM 模式可能耗时数秒，直接 await 由前端 loading）
+      // 选题→撰写→审核→分发全链路（LLM 模式可能耗时数秒，直接 await 由前端 loading）。
+      // M3：body.ideaId 指定创意 → 人设切换到该创意记忆体（CO-02）；
+      // body.platforms 指定分发矩阵（缺省全平台，CO-03），由发布产物多平台适配分发。
+      const body = await readJsonObject(req)
       const content = requireService<ContentService>(setup, 'opc.content')
-      sendJson(req, res, 200, await content.run())
+      wireIdeaMemory(setup, content)
+      const ideaId =
+        typeof body.ideaId === 'string' && body.ideaId.trim().length > 0 ? body.ideaId.trim() : undefined
+      const result = await content.run(ideaId)
+      let dispatch: unknown
+      if (body.platforms !== false) {
+        const requested = Array.isArray(body.platforms) ? body.platforms : undefined
+        if (requested?.some((p) => typeof p !== 'string' || !(PLATFORMS as readonly string[]).includes(p))) {
+          throw new OpcError('VALIDATION_ERROR', `field platforms must be a subset of: ${PLATFORMS.join(', ')}`)
+        }
+        const adapters = defaultPlatformAdapters(
+          (requested as readonly Platform[] | undefined) ?? PLATFORMS,
+        )
+        dispatch = await new MultiPlatformDispatcher(adapters).dispatch(result.content)
+      }
+      sendJson(req, res, 200, { ...result, dispatch })
       return
     }
 
@@ -1549,6 +1605,30 @@ async function dispatchApi(
             throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/workspace/file is not supported`)
           }
           throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'geo') {
+          // GEO 监测历史（prd2.md 4.4）：快照时间倒序 + 生效配置（模拟口径显式标注）
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/geo is not supported`)
+          }
+          requireIdeaStore(setup).require(ideaId)
+          const geo = requireService<GeoService>(setup, 'opc.geo')
+          const limit = parseLimit(url.searchParams.get('limit'), 100, 500)
+          sendJson(req, res, 200, { history: geo.history(ideaId, limit), config: geo.config() })
+          return
+        }
+        if (segments.length === 3 && decodePathSegment(segments[1], 'sub') === 'geo') {
+          if (decodePathSegment(segments[2], 'sub') !== 'refresh' || method !== 'POST') {
+            throw new OpcError('NOT_FOUND', `no such path: ${path}`)
+          }
+          requireIdeaStore(setup).require(ideaId)
+          const geo = requireService<GeoService>(setup, 'opc.geo')
+          const body = await readJsonObject(req)
+          const keywords = Array.isArray(body.keywords)
+            ? body.keywords.filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
+            : undefined
+          sendJson(req, res, 200, await geo.refresh(ideaId, keywords))
+          return
         }
         throw new OpcError('NOT_FOUND', `no such path: ${path}`)
       }

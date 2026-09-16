@@ -81,3 +81,14 @@
         ideasDbPath: './opcos-console-data/ideas.db'
         ideasRoot: './opcos-console-data/ideas'
         bodiesDbPath: './opcos-console-data/memory-bodies.db'
+
+    # GEO 监测（prd2.md 4.4，creativeos/geo-monitor 的物理形态）：'opc.geo' 服务——
+    # 平台可见性/引用率/情感监测 + visibility_drop 告警 + 快照写入记忆体 analytics 流。
+    # 默认 Mock 探测源（主流 AI 平台无公开可见性 API）；GeoProvider 接口可替换真实估值。
+    - id: opc-geo-monitor
+      name: '../../dist/dsh-plugins/opc-geo-monitor/src/index.js'
+      config:
+        ideasDbPath: './opcos-console-data/ideas.db'
+        ideasRoot: './opcos-console-data/ideas'
+        bodiesDbPath: './opcos-console-data/memory-bodies.db'
+        geoDbPath: './opcos-console-data/geo.db'
