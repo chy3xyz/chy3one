@@ -382,6 +382,7 @@
     const detailBox = h('div');
     const mountLine = h('p', { class: 'muted small', style: 'margin:8px 0 0', text: '' });
     let selectedId = null;
+    let detailTab = 'domains'; // 二级 Tab 记忆：同面板内切换创意保持所在页签
 
     const refreshMounted = async () => {
       try {
@@ -778,51 +779,79 @@
         };
         renderVersions(ver && ver.versions);
 
+        // 二级 Tab：10 个区块按旅程收进 6 个页签；全部预渲染，切换只做显隐（不重新请求）
+        const DETAIL_TABS = [
+          ['domains', '三域与版本'],
+          ['mvp', 'MVP 验证'],
+          ['ops', '运营（GEO·人设）'],
+          ['assets', '资产·Token'],
+          ['market', '市场与协同'],
+          ['memory', '记忆体·工作区'],
+        ];
+        const detailBody = h('div', { id: 'idea-detail-body' },
+          h('div', { 'data-tab': 'domains' },
+            h('div', { class: 'card-grid' }, domainCards),
+            ui.sectionCard('三域版本链（ID-04）',
+              h('p', { class: 'muted small', style: 'margin:0 0 6px', text: '三域每次迭代自动入链；回滚会把当前三域先存为新版本，可随时再撤销。' }),
+              versionsBox)),
+          h('div', { 'data-tab': 'mvp', class: 'hidden' },
+            ui.sectionCard('MVP 方案与验证（阶段二）',
+              ui.toolbar(ui.actions(planBtn),
+                h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
+              mvpBox,
+              ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn)))),
+          h('div', { 'data-tab': 'ops', class: 'hidden' },
+            ui.sectionCard('品牌人设（CO-02，每创意独立）',
+              h('div', { class: 'form-grid form-grid-1' }, ui.field('人设 persona', personaInput)),
+              ui.toolbar(personaBtn)),
+            ui.sectionCard('GEO 监测（阶段三）',
+              ui.toolbar(ui.actions(geoBtn),
+                h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
+              geoBox)),
+          h('div', { 'data-tab': 'assets', class: 'hidden' },
+            ui.sectionCard('资产与 Token（阶段四）', assetBox)),
+          h('div', { 'data-tab': 'market', class: 'hidden' },
+            ui.sectionCard('创意市场与协同',
+              ui.toolbar(ui.actions(publishBtn),
+                h('span', { class: 'muted small', text: '发布摘要到市场，别人可以关注它；阶段变更会通知关注者。' })),
+              h('div', { class: 'form-grid' },
+                ui.field('协作者 userId', collabUser), ui.field('协同角色 role', collabRole),
+                ui.grow(ui.field('贡献说明 contribution', collabText))),
+              ui.toolbar(collabBtn),
+              h('p', { class: 'small', style: 'margin:10px 0 4px' }, h('strong', { text: '协同贡献记录' })),
+              collabListBox,
+              relationsBox)),
+          h('div', { 'data-tab': 'memory', class: 'hidden' },
+            h('div', { class: 'two-col' },
+              ui.sectionCard('记忆体 · 检索与近况',
+                ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
+                entriesBox),
+              ui.sectionCard('记忆体 · 写入',
+                ui.toolbar(ui.field('记忆流 stream', streamSelect), ui.field('权威 authority', authoritySelect)),
+                h('div', { class: 'form-grid form-grid-1' }, ui.field('内容 content', contentInput)),
+                ui.toolbar(writeBtn),
+                d.home ? h('details', { class: 'collapse' },
+                  h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
+                  h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)),
+            ui.sectionCard('工作区（MVP 开发文件）', wsBox)));
+        const tabBar = h('div', { class: 'tabs', id: 'idea-detail-tabs' },
+          DETAIL_TABS.map(([key, label]) => h('button', {
+            class: `tab${key === detailTab ? ' active' : ''}`, type: 'button', 'data-tab': key,
+            onclick: () => {
+              detailTab = key;
+              $$('#idea-detail-body [data-tab]').forEach(el => el.classList.toggle('hidden', el.dataset.tab !== key));
+              $$('#idea-detail-tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
+            },
+          }, h('span', { text: label }))));
+
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
             ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, 'ok')),
           stepper,
           h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
-          h('div', { class: 'card-grid' }, domainCards),
-          ui.sectionCard('MVP 方案与验证（阶段二）',
-            ui.toolbar(ui.actions(planBtn),
-              h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
-            mvpBox,
-            ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
-          ui.sectionCard('三域版本链（ID-04）',
-            h('p', { class: 'muted small', style: 'margin:0 0 6px', text: '三域每次迭代自动入链；回滚会把当前三域先存为新版本，可随时再撤销。' }),
-            versionsBox),
-          ui.sectionCard('GEO 监测（阶段三）',
-            ui.toolbar(ui.actions(geoBtn),
-              h('span', { class: 'muted small', text: '监测豆包/DeepSeek/ChatGPT/文心的品牌可见性，数据沉淀到运营数据。' })),
-            geoBox),
-          ui.sectionCard('品牌人设（CO-02，每创意独立）',
-            h('div', { class: 'form-grid form-grid-1' }, ui.field('人设 persona', personaInput)),
-            ui.toolbar(personaBtn)),
-          ui.sectionCard('资产与 Token（阶段四）', assetBox),
-          ui.sectionCard('创意市场与协同',
-            ui.toolbar(ui.actions(publishBtn),
-              h('span', { class: 'muted small', text: '发布摘要到市场，别人可以关注它；阶段变更会通知关注者。' })),
-            h('div', { class: 'form-grid' },
-              ui.field('协作者 userId', collabUser), ui.field('协同角色 role', collabRole),
-              ui.grow(ui.field('贡献说明 contribution', collabText))),
-            ui.toolbar(collabBtn),
-            h('p', { class: 'small', style: 'margin:10px 0 4px' }, h('strong', { text: '协同贡献记录' })),
-            collabListBox,
-            relationsBox),
-          h('div', { class: 'two-col' },
-            ui.sectionCard('记忆体 · 检索与近况',
-              ui.toolbar(ui.grow(ui.field('关键词 q', qInput)), ui.actions(searchBtn, mountBtn)),
-              entriesBox),
-            ui.sectionCard('记忆体 · 写入',
-              ui.toolbar(ui.field('记忆流 stream', streamSelect), ui.field('权威 authority', authoritySelect)),
-              h('div', { class: 'form-grid form-grid-1' }, ui.field('内容 content', contentInput)),
-              ui.toolbar(writeBtn),
-              d.home ? h('details', { class: 'collapse' },
-                h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
-                h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)),
-          ui.sectionCard('工作区（MVP 开发文件）', wsBox));
+          tabBar,
+          detailBody);
       }, '创意详情加载失败');
     }
 
