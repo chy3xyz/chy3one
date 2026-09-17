@@ -219,8 +219,11 @@
       // 初始路由到该面板；非法值忽略，走默认 overview
       const requested = new URLSearchParams(location.search).get('panel');
       if (requested && ROUTE_NAMES.includes(requested)) location.hash = `#/${requested}`;
-      if (location.hash !== `#/${router.current()}`) location.hash = `#/${router.current()}`;
-      else router.renderPanel();
+      // hash 已是合法面板（含 ?query 深链参数）时原样保留并直接渲染；
+      // 仅当面板名非法/为空时才归一化为默认 overview（不再抹掉 query）
+      const m = /^#\/([a-z]+)(?:\?(.*))?$/.exec(location.hash);
+      if (!(m && ROUTE_NAMES.includes(m[1]))) location.hash = `#/${router.current()}`;
+      router.renderPanel();
     },
   };
 
