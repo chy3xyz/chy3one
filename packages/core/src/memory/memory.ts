@@ -15,6 +15,11 @@ export interface MemoryEntry {
   /** 秒；检索时惰性过期（应对 AR-RK07 记忆膨胀） */
   ttl?: number
   createdAt: number
+  /**
+   * 所有者用户 ID（多用户模式，可选）：
+   * undefined = 存量共享条目（登录用户均可见）；写入时带 owner 即个人条目。
+   */
+  owner?: string
 }
 
 export type NewMemoryEntry = Omit<MemoryEntry, 'id' | 'createdAt'>
@@ -24,6 +29,11 @@ export interface MemoryQuery {
   category?: MemoryCategory
   keyword?: string
   limit?: number
+  /**
+   * 按所有者过滤（多用户口径）：命中 owner 相等的个人条目 + 无主共享条目；
+   * 不传 = 不做所有者过滤（v1 行为，见全部）。
+   */
+  owner?: string
 }
 
 export interface MemoryStore {
@@ -70,6 +80,8 @@ export class JsonlMemoryStore implements MemoryStore {
         if (e.ttl !== undefined && e.createdAt / 1000 + e.ttl < nowSec) return false
         if (criteria.scope && e.scope !== criteria.scope) return false
         if (criteria.category && e.category !== criteria.category) return false
+        // 多用户口径：按 owner 过滤 = 该用户的个人条目 + 无主共享条目
+        if (criteria.owner && e.owner !== undefined && e.owner !== criteria.owner) return false
         if (keyword && !e.content.toLowerCase().includes(keyword)) return false
         return true
       })

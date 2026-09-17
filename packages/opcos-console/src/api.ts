@@ -1584,6 +1584,8 @@ async function dispatchApi(
         keyword: nonEmptyParam(url.searchParams.get('q')),
         category: nonEmptyParam(url.searchParams.get('category')) as MemoryQuery['category'],
         limit: 50,
+        // 多用户口径：登录用户只见自己的个人条目 + 存量共享条目
+        ...(user ? { owner: user.id } : {}),
       })
       sendJson(req, res, 200, { entries })
       return
@@ -1597,7 +1599,9 @@ async function dispatchApi(
         category: requireOneOf(body, 'category', ['soul', 'user', 'project', 'fact', 'lesson', 'topic', 'rules'] as const),
         content: requireString(body, 'content'),
         confidence: requireConfidence(body),
-      })
+        // 多用户：写入归属当前登录者（个人条目）
+        ...(user ? { owner: user.id } : {}),
+      } as NewMemoryEntry)
       sendJson(req, res, 200, entry)
       return
     }

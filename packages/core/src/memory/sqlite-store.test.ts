@@ -94,3 +94,20 @@ test('sqlite memory: 重启恢复（重新打开同一文件）', () => {
   assert.equal(all[0].id, next.id)
   reopened.close()
 })
+
+test('sqlite memory: owner 过滤——个人条目私有 + 无主共享（多用户口径）', () => {
+  const store = new SqliteMemoryStore(join(dir, 'owner.db'))
+  store.write({ scope: 'global', category: 'soul', content: '甲的人设', confidence: 0.9, owner: 'user-a' })
+  store.write({ scope: 'global', category: 'lesson', content: '乙的教训', confidence: 0.8, owner: 'user-b' })
+  store.write({ scope: 'global', category: 'fact', content: '共享事实', confidence: 0.7 })
+
+  const aView = store.query({ owner: 'user-a', limit: 50 })
+  assert.equal(aView.length, 2, '甲 = 自己的 + 无主共享')
+  assert.equal(store.query({ owner: 'user-b', limit: 50 }).length, 2)
+  assert.equal(store.query({ limit: 50 }).length, 3, '不传 owner 见全部（v1 行为）')
+  // 重启恢复后 owner 过滤仍生效（owner 列持久化）
+  store.close()
+  const reopened = new SqliteMemoryStore(join(dir, 'owner.db'))
+  assert.equal(reopened.query({ owner: 'user-a', limit: 50 }).length, 2)
+  reopened.close()
+})

@@ -31,6 +31,7 @@ interface MemoryRow {
   confidence: number
   ttl: number | null
   created_at: number
+  owner: string | null
 }
 
 function rowToEntry(row: MemoryRow): MemoryEntry {
@@ -42,6 +43,7 @@ function rowToEntry(row: MemoryRow): MemoryEntry {
     confidence: row.confidence,
     ...(row.ttl !== null ? { ttl: row.ttl } : {}),
     createdAt: row.created_at,
+    ...(row.owner ? { owner: row.owner } : {}),
   }
 }
 
@@ -72,11 +74,17 @@ export class SqliteMemoryStore implements MemoryStore {
         created_at INTEGER NOT NULL
       )
     `)
+    // 多用户迁移（增量列：owner 存所有者用户 ID，NULL = 存量共享条目）
+    try {
+      this.db.exec('ALTER TABLE memory_entries ADD COLUMN owner TEXT')
+    } catch {
+      /* 列已存在（重复打开同一库） */
+    }
     this.db.exec(
       'CREATE INDEX IF NOT EXISTS idx_memory_scope_category ON memory_entries (scope, category)',
     )
     this.insertStmt = this.db.prepare(
-      'INSERT INTO memory_entries (id, scope, category, content, confidence, ttl, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO memory_entries (id, scope, category, content, confidence, ttl, created_at, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     )
   }
 
@@ -84,7 +92,12 @@ export class SqliteMemoryStore implements MemoryStore {
     if (entry.confidence < 0 || entry.confidence > 1) {
       throw new RangeError('confidence must be within [0,1]')
     }
-    const full: MemoryEntry = { ...entry, id: randomUUID(), createdAt: this.now() }
+    const full: MemoryEntry = {
+      ...entry,
+      id: randomUUID(),
+      createdAt: this.now(),
+      ...(entry.owner ? { owner: entry.owner } : {}),
+    }
     this.insertStmt.run(
       full.id,
       full.scope,
@@ -93,6 +106,7 @@ export class SqliteMemoryStore implements MemoryStore {
       full.confidence,
       full.ttl ?? null,
       full.createdAt,
+      full.owner ?? null,
     )
     return full
   }
@@ -127,6 +141,11 @@ export class SqliteMemoryStore implements MemoryStore {
       where.push('category = ?')
       params.push(criteria.category)
     }
+    // 多用户口径：owner 过滤 = 该用户的个人条目 + 无主共享条目（与 Jsonl 实现同语义）
+    if (criteria.owner) {
+      where.push('(owner = ? OR owner IS NULL)')
+      params.push(criteria.owner)
+    }
     if (criteria.keyword) {
       // LIKE 默认对 ASCII 大小写不敏感；% / _ 作为通配符（Phase 2 换 FTS5 后消除）
       where.push("content LIKE '%' || ? || '%'")
@@ -134,7 +153,7 @@ export class SqliteMemoryStore implements MemoryStore {
     }
     const rows = this.db
       .prepare(
-        `SELECT id, scope, category, content, confidence, ttl, created_at
+        `SELECT id, scope, category, content, confidence, ttl, created_at, owner
          FROM memory_entries
          WHERE ${where.join(' AND ')}
          ORDER BY confidence DESC, created_at DESC
