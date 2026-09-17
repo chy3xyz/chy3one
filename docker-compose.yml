@@ -1,0 +1,21 @@
+# OPC-OS 控制台（standalone 完整形态：9 插件宿主 + 鉴权 + GEO 调度）
+# 用法：docker compose up -d --build
+services:
+  opcos-console:
+    build: .
+    container_name: opcos-console
+    ports:
+      - "127.0.0.1:3000:3000"   # 只绑回环：公网经反代进入
+    volumes:
+      - ./opcos-console-data:/app/opcos-console-data
+    environment:
+      - PORT=3000
+      - HOST=127.0.0.1
+      # - DEEPSEEK_API_KEY=sk-...   # 可选：开启 LLM 撰写与热点分析
+      # - STRIPE_SECRET_KEY=...     # 可选：开启真实收款
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

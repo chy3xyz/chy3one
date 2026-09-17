@@ -1,0 +1,33 @@
+# OPC-OS 控制台反代样例（TLS 终止 + 基础认证）
+# 控制台自身只监听 127.0.0.1:3000（HOST 默认回环），公网流量必须经此进入。
+#
+# 生成 basic auth 密码文件：
+#   sudo htpasswd -c /etc/nginx/opcos.htpasswd yourname
+# 证书（二选一）：certbot --nginx -d console.example.com 自动配置，或自行指定。
+
+server {
+    listen 443 ssl http2;
+    server_name console.example.com;
+
+    # ssl_certificate /etc/letsencrypt/live/console.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/console.example.com/privkey.pem;
+
+    # 基础认证（控制台内置多用户登录，此处为入口层第二道防线）
+    auth_basic "OPC-OS";
+    auth_basic_user_file /etc/nginx/opcos.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;   # 应用据此为会话 Cookie 加 Secure
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 120s;                    # 内容流水线 LLM 模式可能较慢
+    }
+}
+
+server {
+    listen 80;
+    server_name console.example.com;
+    return 301 https://$host$request_uri;
+}

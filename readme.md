@@ -30,6 +30,23 @@ npm run console # 独立运行控制台（默认 http://127.0.0.1:3000）
 
 接入真实智能（可选，均有降级）：`DEEPSEEK_API_KEY` 开启 AI 撰写与热点分析；`stripeSecretKey` 开启真实收款；DSH 配置搜索 provider 后热点自动并入。
 
+## 云服务器部署
+
+单进程 Node 应用 + 本地文件存储，最低 1 核 1GB 即可运行：
+
+```bash
+# Docker 方式（推荐）
+docker compose up -d --build          # 数据持久化在 ./opcos-console-data
+
+# 裸机/VM 方式（需 Node >= 22.19）
+npm ci && npm run build
+PORT=3000 HOST=127.0.0.1 node dist/opcos-console/src/server.js   # systemd 见 deploy/
+```
+
+公网访问：控制台只监听回环（HOST=127.0.0.1），用 nginx/caddy 做 TLS 终止后转发
+（样例见 deploy/nginx.conf.sample，含 basic auth 双层防线；内置多用户登录为第一道防线）。
+可选环境变量：`DEEPSEEK_API_KEY`（AI 撰写）、`STRIPE_SECRET_KEY`（真实收款）。
+
 ## 安装进 DSH（推荐运行方式）
 
 见 packages/opcos-bundle/README.md。安装后 `dsh web` 的每个页面出现 "⚡ OPC-OS" 启动器，点击即达控制台（支持 `?opcos-panel=orders` 深链直达）。

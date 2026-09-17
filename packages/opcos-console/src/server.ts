@@ -269,6 +269,10 @@ function invokedDirectly(): boolean {
 }
 
 if (invokedDirectly()) {
-  const { url: consoleUrl } = await startConsole()
+  // 云部署入口：PORT/HOST 环境变量覆盖默认（127.0.0.1:3000）。
+  // 公网部署建议 HOST 保持 127.0.0.1，由同机反代（nginx/caddy）做 TLS 与鉴权后转发。
+  const port = Number(process.env.PORT ?? '') || DEFAULT_PORT
+  const host = process.env.HOST ?? DEFAULT_HOST
+  const { url: consoleUrl } = await startConsole({ port, host })
   console.log(`[opcos-console] OPC-OS 统一控制台已启动: ${consoleUrl}`)
 }

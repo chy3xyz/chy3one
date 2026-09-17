@@ -1,0 +1,26 @@
+# OPC-OS 控制台 systemd 单元（裸机/VM 部署）
+# 安装：
+#   sudo cp deploy/opcos-console.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now opcos-console
+# 前置：服务器已装 Node >= 22.19（node:sqlite 依赖），仓库已 npm ci && npm run build
+[Unit]
+Description=OPC-OS Console (CreativeOS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径修改 WorkingDirectory / ExecStart
+WorkingDirectory=/opt/opcos
+ExecStart=/usr/bin/node dist/opcos-console/src/server.js
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+# Environment=DEEPSEEK_API_KEY=sk-...
+Restart=always
+RestartSec=3
+# 数据目录权限（opcos-console-data 由应用自建 0700）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
