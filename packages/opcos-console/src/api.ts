@@ -1815,8 +1815,9 @@ async function dispatchApi(
     }
 
     case 'GET /api/auth/me': {
-      // 探针端点：未登录返回 200 + user:null（前端据此渲染登录页），不触发 401
-      sendJson(req, res, 200, { user: user ?? null })
+      // 探针端点：未登录返回 200 + user:null（前端据此渲染登录页），不触发 401；
+      // authEnabled 供 v1 无鉴权模式区分（此时前端不做登录流，直接进面板）
+      sendJson(req, res, 200, { user: user ?? null, authEnabled: !!setup.auth })
       return
     }
 
