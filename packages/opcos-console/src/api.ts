@@ -1883,9 +1883,12 @@ async function dispatchApi(
       const billing = setup.getService('opc.billing') as BillingEngine | undefined
       const revenueLedger = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
       sendJson(req, res, 200, {
-        // 段1 创意：实体库优先（与 GET /api/ideas 同源），实体库缺席降级 topic 记忆计数
+        // 段1 创意：登录态按用户可见性口径（我的+团队的+存量无主，与 GET /api/ideas 同源），
+        // 实体库缺席降级 topic 记忆计数
         ideas: setup.ideaStore
-          ? setup.ideaStore.count()
+          ? user
+            ? setup.ideaStore.listForUser(user.id, userTeamIds(setup, user)).length
+            : setup.ideaStore.count()
           : memory
             ? memory.query({ category: 'topic', limit: 1000 }).length
             : 0,
