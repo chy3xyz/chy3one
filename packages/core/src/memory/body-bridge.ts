@@ -56,8 +56,12 @@ export class IdeaMemoryBridge implements MemoryStore {
       limit: criteria.limit ?? 10,
     })
     // 流可能承载多个 v1 类别（description ← topic/soul/rules/project）：
-    // 按 content 无法反解类别，统一以请求类别标注（pipeline 按类别查询的语义不变）
-    return entries.map((entry) => this.toMemoryEntry(entry, criteria.category ?? this.defaultCategory(stream)))
+    // 按 content 无法反解类别，统一以请求类别标注（pipeline 按类别查询的语义不变）。
+    // JSON 标记条目（{"kind":...} 系统记录：人设快照/域迭代审计等）不是自然语言记忆，
+    // 不应成为选题/人设候选，过滤之（正本与索引仍保留，供版本链与检索）。
+    return entries
+      .filter((entry) => !entry.content.trimStart().startsWith('{'))
+      .map((entry) => this.toMemoryEntry(entry, criteria.category ?? this.defaultCategory(stream)))
   }
 
   private defaultCategory(stream: IdeaMemoryStream | undefined): MemoryCategory {

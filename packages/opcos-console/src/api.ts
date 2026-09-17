@@ -2074,8 +2074,13 @@ async function dispatchApi(
             const points = Array.isArray(body.points) ? body.points.map((p) => String(p)) : undefined
             updated = store.updateDomain(ideaId, key, { summary, points })
             hub?.write(ideaId, 'description', {
-              content: `三域迭代[${DOMAIN_LABELS[key]}] ${updated.domains[key].summary}` +
-                (updated.domains[key].points.length > 0 ? `（要点：${updated.domains[key].points.join('；')}）` : ''),
+              // JSON 标记条目：域迭代审计记录（桥接层过滤，不进选题候选）
+              content: JSON.stringify({
+                kind: 'domain-edit',
+                domain: key,
+                summary: updated.domains[key].summary,
+                points: updated.domains[key].points,
+              }),
               confidence: 0.8,
               authority: 'user',
             })
@@ -2083,7 +2088,8 @@ async function dispatchApi(
             const domains = validateDomains(body)
             updated = store.updateDomains(ideaId, domains)
             hub?.write(ideaId, 'description', {
-              content: `三域整体迭代 ${JSON.stringify(domains)}`,
+              // JSON 标记条目：三域整体迭代审计记录
+              content: JSON.stringify({ kind: 'domain-edit', domains }),
               confidence: 0.8,
               authority: 'user',
             })
@@ -2331,7 +2337,12 @@ async function dispatchApi(
           const store = requireIdeaStore(setup)
           const result = store.rollback(ideaId, version, note)
           requireMemoryHub(setup).write(ideaId, 'description', {
-            content: `三域回滚至 v${version}（note：${note ?? '—'}），恢复态入链为 v${result.version.version}`,
+            content: JSON.stringify({
+              kind: 'domain-rollback',
+              rolledBackTo: version,
+              note: note ?? null,
+              restoredVersion: result.version.version,
+            }),
             confidence: 0.8,
             authority: 'user',
           })

@@ -112,3 +112,21 @@ test('body bridge: 端到端——流水线按 ideaId 隔离运行（选题/沉�
   const candidates = strategy.generateCandidates(bridgeA)
   assert.ok(candidates.length >= 5)
 })
+
+test('body bridge: JSON 标记条目不进检索候选（人设/域迭代审计不是选题）', () => {
+  const { hub, bridgeA } = setup()
+  bridgeA.write({ scope: 'global', category: 'topic', content: '三源合恰课程网站创意原文', confidence: 0.8 })
+  // 系统以 JSON 标记写入的人设快照与域迭代审计
+  hub.write('idea-a', 'description', {
+    content: JSON.stringify({ kind: 'idea-persona', persona: '布道者人设' }),
+    confidence: 0.9, authority: 'user',
+  })
+  hub.write('idea-a', 'description', {
+    content: JSON.stringify({ kind: 'domain-edit', summary: '域迭代审计' }),
+    confidence: 0.8, authority: 'user',
+  })
+
+  const topics = bridgeA.query({ category: 'topic', limit: 50 })
+  assert.equal(topics.length, 1, 'JSON 标记条目应被过滤，只剩自然语言原文')
+  assert.equal(topics[0]?.content, '三源合恰课程网站创意原文')
+})

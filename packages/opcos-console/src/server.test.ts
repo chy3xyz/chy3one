@@ -671,7 +671,7 @@ test('console: 创意实体端点（M1）——详情/三域迭代/记忆体检�
     `${url}api/ideas/${ideaA.id}/entries?q=落地页工具`,
   )
   assert.equal(entries1.body.entries.length, 1)
-  assert.ok(entries1.body.entries[0]?.content.includes('三域迭代'))
+  assert.ok(entries1.body.entries[0]?.content.includes('domain-edit'), '域迭代应以 JSON 标记入正本')
 
   // 手动写记忆体 + 检索
   const written = await postJson<{ entry: { id: string } }>(`${url}api/ideas/${ideaA.id}/entries`, {
@@ -983,7 +983,7 @@ test('console: 创意版本链与回滚（ID-04）——迭代入链/回滚以�
 
   // 回滚描述写入 description 流正本
   const entries = await getJson<{ entries: Array<{ content: string }> }>(
-    `${url}api/ideas/${idea.id}/entries?q=${encodeURIComponent('三域回滚')}`,
+    `${url}api/ideas/${idea.id}/entries?q=${encodeURIComponent('domain-rollback')}`,
   )
   assert.equal(entries.body.entries.length, 1)
 
