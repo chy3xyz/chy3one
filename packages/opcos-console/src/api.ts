@@ -35,6 +35,7 @@ import {
   TokenLedger,
   SubscriptionStore,
   requirePeriod,
+  runAgentDev,
   TOKEN_ROLES,
   TOKEN_ROLE_LABELS,
   COLLAB_ROLES,
@@ -82,6 +83,7 @@ import {
 } from '../../core/src/index.js'
 import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
 import { createPackage, type Ed25519KeyPair, type SkillPackage } from '../../core/src/skill/packager.js'
+import { resolveDshAgentRunner } from '../../dsh-adapter/src/index.js'
 import type { TelemetryBus, TelemetryEvent } from '../../dsh-adapter/src/index.js'
 import { detectDshRuntime } from '../../dsh-adapter/src/index.js'
 import { readQuarantineList, type HandshakeReport, type HandshakeStatus } from '../../opcos-bundle/src/health.js'
@@ -2247,6 +2249,71 @@ async function dispatchApi(
               throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/workspace is not supported`)
             }
             sendJson(req, res, 200, { root: ws.path, files: ws.list() })
+            return
+          }
+          if (segments.length === 3 && decodePathSegment(segments[2], 'sub') === 'agent-run') {
+            // IP-02 Agent 开发执行：按 MVP 方案组装任务书 → 拉起 DSH Agent（宿主 agents 服务）
+            // 在创意工作区内产出脚手架 → 决策正本。宿主无 agents 服务时降级记录式
+            //（任务书存工作区，产出留待人工/后续 Agent 会话）。
+            if (method !== 'POST') {
+              throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/workspace/agent-run is not supported`)
+            }
+            const store = requireIdeaStore(setup)
+            const idea = store.require(ideaId)
+            const ideaHome = store.homeDir(ideaId)
+            if (!ideaHome) {
+              throw new OpcError('SERVICE_UNAVAILABLE', 'agent development requires ideas root to be configured')
+            }
+            // MVP 方案：请求带 plan 用请求值，否则用 decisions 流最近一次生成方案
+            const hub = requireMemoryHub(setup)
+            let plan: ReturnType<typeof planMvp> | undefined
+            const body = method === 'POST' ? await readJsonObject(req) : {}
+            if (body.plan && typeof body.plan === 'object') {
+              plan = body.plan as ReturnType<typeof planMvp>
+            } else {
+              const planEntry = hub
+                .query({ ideaIds: [ideaId], stream: 'decisions', limit: 50 })
+                .map((e) => {
+                  try {
+                    return JSON.parse(e.content) as { kind?: string; plan?: ReturnType<typeof planMvp> }
+                  } catch {
+                    return null
+                  }
+                })
+                .find((v) => v?.kind === 'mvp-plan' && v.plan)
+            plan = planEntry?.plan
+            }
+            if (!plan) {
+              throw new OpcError('VALIDATION_ERROR', 'no MVP plan found: generate one first (POST /api/ideas/:id/mvp/plan)')
+            }
+            const ws = new IdeaWorkspace(workspacePathFor(ideaHome))
+            const runner = resolveDshAgentRunner({ getService: setup.getService, cwd: ws.path })
+            const result = await runAgentDev(idea, plan, ws, {
+              execute: async (task) => {
+                if (!runner) {
+                  // 记录式降级：任务书落盘（AGENT-TASK.md），Agent 会话留待宿主接入
+                  return {
+                    mode: 'recorded' as const,
+                    output: '宿主未提供 agents 服务（未运行 dsh 或非 DSH 宿主）：任务书已落盘 AGENT-TASK.md，可在 DSH 会话中按任务书执行',
+                    files: [{ path: 'AGENT-TASK.md', content: task.prompt }],
+                  }
+                }
+                const outcome = await runner(task.prompt)
+                return { ...outcome, files: [] } // 真实 Agent 自行在工作区写文件（cwd 注入）
+              },
+              writeDecision: (id, content) => {
+                hub.write(id, 'decisions', { content, confidence: 0.85, authority: 'model' })
+              },
+            })
+            sendJson(req, res, 200, {
+              ...result,
+              files: result.files.length > 0 ? result.files : ws.list(),
+              workspace: { root: ws.path },
+              hint:
+                result.mode === 'spawned'
+                  ? 'DSH Agent 已在创意工作区完成开发任务'
+                  : '已记录任务书到工作区（宿主未暴露 Agent 服务）；接入 DSH 后可真实拉起',
+            })
             return
           }
           if (segments.length === 3 && decodePathSegment(segments[2], 'sub') === 'file') {

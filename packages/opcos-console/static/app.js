@@ -565,6 +565,15 @@
           toast.ok('MVP 方案已生成，正本已存入决策记忆');
           renderMvp(sg, res.plan);
         });
+        // DSH Agent 开发执行（IP-02）：按 MVP 方案拉起 Agent 在创意工作区产出脚手架
+        const devBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '启动 Agent 开发', title: '按 MVP 方案拉起 DSH Agent 在工作区开发（宿主无 Agent 服务时落盘任务书）' });
+        busyBtn(devBtn, 'Agent 开发中…（真实模式可能需要数分钟）', async () => {
+          const res = await api.post(`/api/ideas/${idea.id}/workspace/agent-run`, {});
+          toast.ok(res.hint || `Agent 开发完成：产出 ${res.files.length} 个文件`);
+          renderMvp(sg, null);
+          // 刷新工作区文件列表（同一页签内）
+          api.get(`/api/ideas/${idea.id}/workspace`).then(fresh => renderWs(fresh && fresh.root, (fresh && fresh.files) || [])).catch(() => {});
+        });
         const vSource = h('select', { class: 'input' },
           h('option', { value: 'feedback', text: '用户反馈' }),
           h('option', { value: 'metric', text: '数据指标' }));
@@ -839,10 +848,11 @@
               versionsBox)),
           h('div', { 'data-tab': 'mvp', class: 'hidden' },
             ui.sectionCard('MVP 方案与验证（阶段二）',
-              ui.toolbar(ui.actions(planBtn),
+              ui.toolbar(ui.actions(planBtn, devBtn),
                 h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
               mvpBox,
-              ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn)))),
+              ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
+            ui.sectionCard('工作区（MVP 开发文件）', wsBox)),
           h('div', { 'data-tab': 'ops', class: 'hidden' },
             ui.sectionCard('品牌人设（CO-02，每创意独立）',
               h('div', { class: 'form-grid form-grid-1' }, ui.field('人设 persona', personaInput)),
