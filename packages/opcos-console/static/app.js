@@ -181,6 +181,39 @@
       fn();
     }, ms);
   }
+  /**
+   * 内联操作表单（替代原生 prompt/confirm，风格与面板一致）：
+   * 在 #main 内展开一张小卡（标题 + 可选输入 + 确认/取消），重复调用自动收起上一张。
+   * key 同名互斥（同一任务的完成/阻塞不叠加）；submit(value) 抛错由 api 层 toast。
+   */
+  function openInlineForm(key, title, placeholder, submit, onDone, opts = {}) {
+    const id = 'inline-form';
+    document.getElementById(id)?.remove(); // 互斥：一次只留一张
+    const input = opts.noInput ? null : h('input', { class: 'input', placeholder: placeholder || '' });
+    const confirmBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: opts.confirmText || '确认' });
+    const cancelBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '取消' });
+    const form = h('div', { class: 'card section-card', id, style: 'margin:8px 0' },
+      h('p', { class: 'small', style: 'margin:0 0 6px' }, h('strong', { text: title }),
+        opts.danger ? ' —— ' : '', opts.danger ? h('span', { class: 'muted', text: opts.danger }) : null),
+      input ? ui.grow(ui.field(opts.fieldLabel || '内容', input)) : null,
+      h('div', { class: 'toolbar-actions' }, confirmBtn, cancelBtn));
+    (opts.anchor || document.getElementById('main'))?.append(form);
+    cancelBtn.addEventListener('click', () => form.remove());
+    confirmBtn.addEventListener('click', async () => {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = '提交中…';
+      try {
+        await submit(input ? input.value.trim() : '');
+        form.remove();
+        onDone && onDone();
+      } catch {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = opts.confirmText || '确认';
+      }
+    });
+    input && input.focus();
+    return form;
+  }
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
@@ -276,10 +309,14 @@
       try {
         const data = (await api.get('/api/health')) || {};
         const plugins = data.plugins || [];
-        healthLine.textContent = '系统状态：'
-          + (plugins.length
-            ? plugins.map(p => `${p.name} ${p.ok ? '正常' : '隔离'}`).join(' · ')
-            : '插件清单为空');
+        const okCount = plugins.filter(p => p.ok).length;
+        const bad = plugins.filter(p => !p.ok);
+        // 写行为不写机制（console-voice）：正常时一句话收敛，异常时展开点名
+        healthLine.textContent = plugins.length
+          ? (bad.length === 0
+            ? `系统状态良好：${okCount}/${plugins.length} 个组件全部在线`
+            : `系统状态：${okCount}/${plugins.length} 个组件在线，异常：${bad.map(p => p.name).join('、')}`)
+          : '系统状态：组件清单为空';
       } catch { healthLine.textContent = '系统状态：不可用'; }
     };
     const loadTelemetry = () => loadInto(telemetryBox, null, async () => {
@@ -325,7 +362,7 @@
       ui.pageTitle('创意变现', '今天，你的创意走到哪一步了？'),
       ui.sectionCard(null,
         h('div', { class: 'funnel' },
-          stage('① 记下的创意 · 选题记忆',
+          stage('① 记下的创意 · 自动生成三域草案',
             numLine(ideasNum, '条创意'),
             h('div', { class: 'funnel-action' },
               h('div', { class: 'funnel-input-row' },
@@ -416,6 +453,10 @@
     /** 详情区：阶段推进 + 三域编辑（带引导问题）+ MVP 方案/验证 + 记忆体 + 工作区 */
     async function openDetail() {
       if (!selectedId) { detailBox.innerHTML = ''; return; }
+      // 详情在列表下方：打开/切换后滚到详情起点（深链进入时视口直接落在详情）
+      requestAnimationFrame(() => {
+        if (detailBox.isConnected) detailBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
       await loadInto(detailBox, '加载创意详情…', async () => {
         const [d, sg, ws, ldg, tk, ver] = await Promise.all([
           api.get(`/api/ideas/${selectedId}`),
@@ -766,13 +807,12 @@
               ? ui.badge('当前', 'ok')
               : (() => {
                   const btn = h('button', { class: 'btn btn-sm', type: 'button', text: '回滚到此版' });
-                  btn.addEventListener('click', async () => {
-                    if (!window.confirm(`回滚到 v${v.version}？当前三域会先存为新版本（可再撤销）。`)) return;
-                    try {
-                      const res = await api.post(`/api/ideas/${idea.id}/rollback`, { version: v.version });
-                      toast.ok(`已回滚至 v${v.version}，恢复态入链为 v${res.version.version}`);
-                      await Promise.all([openDetail(), loadList()]);
-                    } catch { /* api 层已 toast */ }
+                  btn.addEventListener('click', () => {
+                    openInlineForm(`rollback-${v.version}`, `回滚到 v${v.version}`, '回滚说明（可选，如：回到初稿方向）', (note) =>
+                      api.post(`/api/ideas/${idea.id}/rollback`, { version: v.version, note: note || undefined }), () => {
+                      toast.ok(`已回滚至 v${v.version}，当前三域已存为新版本（可再撤销）`);
+                      openDetail();
+                    }, { fieldLabel: '回滚说明 note', confirmText: '确认回滚', danger: '当前三域会先存为新版本，历史不可改写、可再撤销' });
                   });
                   return btn;
                 })();
@@ -1077,20 +1117,21 @@
       }
       if (t.status === 'claimed') {
         buttons.push(actionBtn('完成', async () => {
-          const result = window.prompt(`交付结果 result（${t.title}）`, '已完成');
-          if (result === null) return;
-          await mutate('complete', { result: result.trim() || '已完成' });
-          toast.ok(`任务完成：${t.title}`);
-          load();
+          // 内联表单替换原生弹窗：在该行下方展开，填交付结果
+          const inline = openInlineForm(t.id, '完成任务', '交付结果 result，如：已完成并附链接', (value) => mutate('complete', { result: value || '已完成' }), () => {
+            toast.ok(`任务完成：${t.title}`);
+            load();
+          });
+          inline.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }));
       }
       if (t.status !== 'blocked') {
         buttons.push(actionBtn('阻塞', async () => {
-          const reason = window.prompt(`阻塞原因（${t.title}）`, '等待外部资源');
-          if (reason === null) return;
-          await mutate('block', { reason: reason.trim() || '未填写原因' });
-          toast.info(`任务已阻塞：${t.title}`);
-          load();
+          const inline = openInlineForm(t.id, '标记阻塞', '阻塞原因，如：等待外部资源', (value) => mutate('block', { reason: value || '未填写原因' }), () => {
+            toast.info(`任务已阻塞：${t.title}`);
+            load();
+          });
+          inline.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }));
       }
       return buttons.length
@@ -2001,10 +2042,10 @@
       setTimeout(() => location.reload(), 1200);
     });
 
-    const signOutAllBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '注销所有会话' });
+    const signOutAllBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '全端下线' });
     signOutAllBtn.addEventListener('click', () => {
-      if (!window.confirm('将注销本账号在其他设备上的全部会话（本机也需重新登录），确定？')) return;
-      toast.info('改密即可全端下线：请使用「修改密码」完成该操作');
+      // 改密是全端下线的唯一路径（会话 revoke 未暴露独立端点）——引导而非模拟确认
+      toast.info('改密即可全端下线：请使用下方「修改密码」完成该操作');
     });
 
     render(box,
