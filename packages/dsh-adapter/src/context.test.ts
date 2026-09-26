@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import {
   createMockContext,
   adaptContext,
@@ -116,7 +116,15 @@ test('compat: cordis 4.x Context 类型表面——provide/on/effect/get（锁 A
 })
 
 test('compat: dsh-agent-loop waterfall 接管点与载荷字段（锁 ARD-005 计费埋点）', () => {
-  const loopSrc = readFileSync('node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js', 'utf8')
+  // rc.3 起 dsh-agent-loop 可能被 npm 嵌套进 @deepseek-ai/dsh/node_modules：
+  // 兼容顶层（直接依赖）与嵌套（传递依赖）两种布局，都找不到即真实漂移
+  const CANDIDATE_PATHS = [
+    'node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js',
+    'node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js',
+  ]
+  const found = CANDIDATE_PATHS.find((p) => existsSync(p))
+  assert.ok(found, `dsh-agent-loop 未找到（候选：${CANDIDATE_PATHS.join(' | ')}）—— DSH 包布局漂移，需更新 packages/dsh-adapter`)
+  const loopSrc = readFileSync(found, 'utf8')
   // 三个接管点必须存在
   for (const hook of ['agent/pre-step', 'agent/request', 'agent/request-error']) {
     assert.ok(loopSrc.includes(`"${hook}"`), `waterfall hook ${hook} missing — DSH API 漂移，需更新 packages/dsh-adapter`)
