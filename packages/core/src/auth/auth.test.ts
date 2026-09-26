@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { UserStore } from './users.js'
+import { UserStore, LoginLockout } from './users.js'
 import { SessionStore, extractSessionToken, SESSION_COOKIE } from './sessions.js'
 import { TeamStore } from './teams.js'
 
@@ -133,4 +133,36 @@ test('teams: 建队/邀请/成员/权限（owner 两角色制）', () => {
   // 不存在的队伍
   assert.throws(() => store.require('team-none'), /does not exist/)
   store.close()
+})
+
+test('login lockout: 5 次失败锁 10 分钟，成功清零，冷却自动解除', () => {
+  let clock = 1_000_000
+  const lockout = new LoginLockout()
+  // 4 次失败：未锁定
+  for (let i = 0; i < 4; i++) {
+    const s = lockout.recordFailure('Alice', clock)
+    assert.equal(s.locked, false, `第 ${i + 1} 次失败不应锁定`)
+  }
+  // 第 5 次：锁定 10 分钟
+  const locked = lockout.recordFailure('alice', clock) // 大小写不敏感（同 alice）
+  assert.equal(locked.locked, true)
+  assert.ok(locked.retryAfterSec > 590 && locked.retryAfterSec <= 600)
+
+  // 冷却期内仍锁定
+  clock += 5 * 60_000
+  assert.equal(lockout.status('alice', clock).locked, true)
+
+  // 冷却完成自动解除
+  clock += 6 * 60_000
+  const released = lockout.status('alice', clock)
+  assert.equal(released.locked, false)
+  // 解除后重新计数：4 次不锁
+  for (let i = 0; i < 4; i++) lockout.recordFailure('alice', clock)
+  assert.equal(lockout.status('alice', clock).locked, false)
+
+  // 成功登录清零
+  for (let i = 0; i < 4; i++) lockout.recordFailure('alice', clock)
+  lockout.reset('alice')
+  assert.equal(lockout.status('alice', clock).locked, false)
+  assert.equal(lockout.recordFailure('alice', clock).locked, false, '清零后 1 次失败不锁')
 })

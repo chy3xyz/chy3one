@@ -20,6 +20,7 @@ import {
   UserStore,
   SessionStore,
   TeamStore,
+  LoginLockout,
   extractSessionToken,
   SESSION_COOKIE,
   AUTH_FAIL_DELAY_MS,
@@ -303,6 +304,7 @@ const ERROR_STATUS: Record<string, number> = {
   METHOD_NOT_ALLOWED: 405,
   UNAUTHORIZED: 401,
   AUTH_FAILED: 401,
+  AUTH_LOCKED: 429,
   VERSION_CONFLICT: 409,
   USERNAME_TAKEN: 409,
   ORDER_STATE_INVALID: 409,
@@ -449,6 +451,8 @@ export interface AuthStores {
   users: UserStore
   sessions: SessionStore
   teams: TeamStore
+  /** 登录失败锁定（可选；缺省不启用锁定，仅时延钝化） */
+  lockout?: LoginLockout
 }
 
 /** 请求处理层的就绪形态（deps 经默认值补全后的冻结视图） */
@@ -1794,13 +1798,25 @@ async function dispatchApi(
 
     case 'POST /api/auth/login': {
       const body = await readJsonObject(req)
-      const { users } = requireAuthStores(setup)
-      const matched = users.verify(requireString(body, 'username'), requireString(body, 'password'))
+      const { users, lockout } = requireAuthStores(setup)
+      const username = requireString(body, 'username')
+      // 失败锁定：连续失败达阈值的用户名在冷却期内拒绝（不泄露用户是否存在——
+      // 锁定仅按提交的用户名计算，响应与普通失败一致语义）
+      if (lockout) {
+        const lock = lockout.status(username)
+        if (lock.locked) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, AUTH_FAIL_DELAY_MS))
+          throw new OpcError('AUTH_LOCKED', `尝试次数过多，请 ${lock.retryAfterSec} 秒后重试`)
+        }
+      }
+      const matched = users.verify(username, requireString(body, 'password'))
       if (!matched) {
         // 统一失败延迟：钝化暴力枚举，且不泄露用户是否存在
         await new Promise((resolveDelay) => setTimeout(resolveDelay, AUTH_FAIL_DELAY_MS))
+        lockout?.recordFailure(username)
         throw new OpcError('AUTH_FAILED', '用户名或密码不正确')
       }
+      lockout?.reset(username)
       issueSession(setup, req, res, matched.id)
       sendJson(req, res, 200, { user: matched })
       return

@@ -38,6 +38,7 @@ import {
   SessionStore,
   TeamStore,
   UserStore,
+  LoginLockout,
 } from '../../../core/src/index.js'
 import {
   createApiSetup,
@@ -174,10 +175,25 @@ function createSetup(ctx: OpcContext, dataDir: string, userAuth?: boolean): Cons
           users: new UserStore(join(dataDir, 'users.db')),
           sessions: new SessionStore(join(dataDir, 'sessions.db')),
           teams: new TeamStore(join(dataDir, 'teams.db')),
+          lockout: new LoginLockout(),
         }
+
+  // 会话过期日清（resolve 已惰性清理单条；此处兜底批量回收，防止长期运行缓慢膨胀）
+  let purgeTimer: ReturnType<typeof setInterval> | undefined
+  if (auth) {
+    purgeTimer = setInterval(() => {
+      try {
+        auth.sessions.purgeExpired()
+      } catch {
+        /* 清理失败不影响主流程（下次日清重试） */
+      }
+    }, 86_400_000)
+    purgeTimer.unref?.()
+  }
 
   // 关停（LIFO）：市场索引最后关——先撤路由/HTTP server，再退订埋点，最后 close 索引
   ctx.onDispose(() => index.close())
+  if (purgeTimer) ctx.onDispose(() => clearInterval(purgeTimer))
   ctx.onDispose(() => subscriptions.close())
   ctx.onDispose(() => auth?.users.close())
   ctx.onDispose(() => auth?.sessions.close())

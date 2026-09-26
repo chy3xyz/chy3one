@@ -16,6 +16,62 @@ export interface User {
   createdAt: number
 }
 
+/** 登录失败锁定（内存态，进程重启即清）：同一用户名连续失败达阈值后冷却 */
+export interface LockoutStatus {
+  locked: boolean
+  /** 剩余冷却秒数（locked=false 时为 0） */
+  retryAfterSec: number
+}
+
+const LOCKOUT_THRESHOLD = 5
+const LOCKOUT_COOLDOWN_MS = 10 * 60_000
+
+/**
+ * 进程内登录失败锁定表：键=用户名（小写），值={连续失败次数, 锁定起点}。
+ * 公网部署的第一道爆破防线（配合 AUTH_FAIL_DELAY_MS 时延钝化）；
+ * 校验成功即清零。内存态即可——重启清零的代价远小于引入共享存储的复杂度。
+ */
+export class LoginLockout {
+  private readonly attempts = new Map<string, { count: number; lockedAt: number }>()
+
+  /** 查询锁定状态：锁定期内返回剩余秒数；冷却已过自动解除 */
+  status(username: string, now: number = Date.now()): LockoutStatus {
+    const entry = this.attempts.get(username.toLowerCase())
+    if (!entry) return { locked: false, retryAfterSec: 0 }
+    if (entry.lockedAt === 0) return { locked: false, retryAfterSec: 0 }
+    const elapsed = now - entry.lockedAt
+    if (elapsed >= LOCKOUT_COOLDOWN_MS) {
+      // 冷却完成：解除锁定并保留计数归零（下次失败重新计数）
+      entry.lockedAt = 0
+      entry.count = 0
+      return { locked: false, retryAfterSec: 0 }
+    }
+    return { locked: true, retryAfterSec: Math.ceil((LOCKOUT_COOLDOWN_MS - elapsed) / 1000) }
+  }
+
+  /** 记一次失败：达到阈值即进入冷却 */
+  recordFailure(username: string, now: number = Date.now()): LockoutStatus {
+    const key = username.toLowerCase()
+    const entry = this.attempts.get(key) ?? { count: 0, lockedAt: 0 }
+    // 冷却完成后重新计数
+    if (entry.lockedAt === 0 && entry.count >= LOCKOUT_THRESHOLD) entry.count = 0
+    entry.count += 1
+    if (entry.count >= LOCKOUT_THRESHOLD) entry.lockedAt = now
+    this.attempts.set(key, entry)
+    return this.status(username, now)
+  }
+
+  /** 校验成功：清零 */
+  reset(username: string): void {
+    this.attempts.delete(username.toLowerCase())
+  }
+
+  /** 当前被锁定的用户名数（观测用） */
+  size(): number {
+    return this.attempts.size
+  }
+}
+
 interface UserRow {
   id: string
   username: string

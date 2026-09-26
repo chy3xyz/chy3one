@@ -1123,6 +1123,14 @@ test('console: 多用户鉴权与团队协作——注册/登录/越权 403/团�
   // 重复用户名 409；错误密码 401
   assert.equal((await authedFetch('anon', 'POST', 'api/auth/register', { username: 'alice', password: 'secret123' })).status, 409)
   assert.equal((await authedFetch('anon', 'POST', 'api/auth/login', { username: 'alice', password: 'wrong!' })).status, 401)
+  // 登录失败锁定：连续 5 次失败后，第 6 次起 429 AUTH_LOCKED（第 5 次失败本身仍返回 401）
+  for (let i = 0; i < 5; i++) {
+    const r = await authedFetch('anon', 'POST', 'api/auth/login', { username: 'lockme', password: 'nope123' })
+    assert.equal(r.status, 401, `第 ${i + 1} 次失败应仍为 401`)
+  }
+  const locked = await authedFetch('anon', 'POST', 'api/auth/login', { username: 'lockme', password: 'nope123' })
+  assert.equal(locked.status, 429)
+  assert.equal(locked.body.error.code, 'AUTH_LOCKED')
 
   // alice 创建私有创意；bob 看不到、改不了
   const ideaA = await authedFetch('alice', 'POST', 'api/ideas', { text: '爱丽丝的跨境选品创意' })

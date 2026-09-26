@@ -33,6 +33,7 @@ import {
   SessionStore,
   TeamStore,
   UserStore,
+  LoginLockout,
 } from '../../core/src/index.js'
 import {
   loadWithHandshake,
@@ -173,6 +174,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
           users: new UserStore(join(dataDir, 'users.db')),
           sessions: new SessionStore(join(dataDir, 'sessions.db')),
           teams: new TeamStore(join(dataDir, 'teams.db')),
+          lockout: new LoginLockout(),
         }
 
   const deps: ConsoleDeps = {
