@@ -83,6 +83,11 @@ function summarizeTail(agent: DshAgentHandle['agent'], firstSeq: number): string
     if (text) output = text
   }
   void firstSeq
+  if (!output) {
+    // 无 assistant 产出：多为模型凭据缺失（dsh 无可用模型时会话静默空转）——
+    // 显式告知而非返回空串，让调用方与用户都能区分「跑了但没产出」和「根本没跑」
+    return '⚠️ Agent 会话无 assistant 产出——最常见原因是 DSH 未配置模型凭据。请在 dsh web GUI 设置模型，或以 DEEPSEEK_API_KEY 重启 dsh 后重试。'
+  }
   return output
 }
 
