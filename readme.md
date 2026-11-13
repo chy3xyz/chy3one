@@ -1,5 +1,7 @@
 # OPC-OS · 创意变现操作系统
 
+[![CI](https://github.com/chy3xyz/chy3one/actions/workflows/ci.yml/badge.svg)](https://github.com/chy3xyz/chy3one/actions/workflows/ci.yml)
+
 **让每个创意都有收入。** 基于 DeepSeek Harness（DSH）最新版构建：创意从这里进入（选题/想法），经 AI 团队变成作品（内容/技能），在市场与客户那里变成收入（订单/RaaS 计费）——一条**创意 → 作品 → 收入**的完整漏斗。
 
 需求与架构见 docs/（PRD / ARD / 开发文档）。

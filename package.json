@@ -14,7 +14,8 @@
     "build": "tsc -p .",
     "test": "tsc -p . && node --test \"dist/**/*.test.js\"",
     "demo": "tsc -p . && node dist/opcos-bundle/src/demo.js",
-    "console": "tsc -p . && node dist/opcos-console/src/server.js"
+    "console": "tsc -p . && node dist/opcos-console/src/server.js",
+    "e2e": "node scripts/e2e-lifecycle.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.5.1",

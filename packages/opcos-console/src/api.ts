@@ -1414,10 +1414,12 @@ async function dispatchApi(
         throw new OpcError('VALIDATION_ERROR', `skill ${skillId} is free: install it directly via /api/skills/install`)
       }
       const marketEntry = setup.skillsIndex.get(skillId)
+      // 多用户口径：登录态买家强制为当前用户（防冒名下单，与关注/协同同模式）
+      const buyerId = user ? user.username : requireString(body, 'buyerId')
       const order = orders.createOrder({
         skillId,
         version: requireString(body, 'version'),
-        buyerId: requireString(body, 'buyerId'),
+        buyerId,
         amount: requirePositiveInt(body, 'amountCents'),
         ...(marketEntry ? { authorId: marketEntry.authorId } : {}),
       })
@@ -1470,9 +1472,9 @@ async function dispatchApi(
     }
 
     case 'GET /api/subscriptions': {
-      // SM-04：买家订阅清单（懒判定 active）
+      // SM-04：买家订阅清单（懒判定 active）；登录态强制按当前用户（防越权）
       const subscriptions = requireSubscriptions(setup)
-      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      const buyerId = user ? user.username : nonEmptyParam(url.searchParams.get('buyerId'))
       if (buyerId === undefined) {
         throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
       }
@@ -1481,9 +1483,9 @@ async function dispatchApi(
     }
 
     case 'GET /api/subscriptions/status': {
-      // SM-04：Agent 调用前的权益检查（active = 在订阅期内）
+      // SM-04：Agent 调用前的权益检查（active = 在订阅期内）；登录态强制当前用户
       const subscriptions = requireSubscriptions(setup)
-      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      const buyerId = user ? user.username : nonEmptyParam(url.searchParams.get('buyerId'))
       const skillId = nonEmptyParam(url.searchParams.get('skillId'))
       if (buyerId === undefined || skillId === undefined) {
         throw new OpcError('VALIDATION_ERROR', 'query parameters buyerId and skillId are required')
@@ -1493,7 +1495,9 @@ async function dispatchApi(
     }
 
     case 'GET /api/orders': {
-      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      // 多用户口径：登录态强制按当前用户查询（防越权查他人订单）；
+      // v1 无鉴权模式沿用显式 buyerId
+      const buyerId = user ? user.username : nonEmptyParam(url.searchParams.get('buyerId'))
       if (!buyerId) throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
       const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
       sendJson(req, res, 200, { orders: orders.listByBuyer(buyerId) })
@@ -1520,7 +1524,8 @@ async function dispatchApi(
 
     case 'GET /api/bills': {
       // DE-08 客户账单：买家维度订单 + 总消费（口径：paid+delivered 计入，pending/refunded/cancelled 不计；单位：分）
-      const buyerId = nonEmptyParam(url.searchParams.get('buyerId'))
+      // 多用户口径：登录态强制查当前用户账单（防越权）
+      const buyerId = user ? user.username : nonEmptyParam(url.searchParams.get('buyerId'))
       if (!buyerId) throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
       const orders = requireService<OrderEngine>(setup, 'opc.marketplace.orders')
       const list = orders.listByBuyer(buyerId).sort((a, b) => b.createdAt - a.createdAt)
