@@ -447,6 +447,15 @@
             class: 'btn btn-sm', type: 'button', text: '打开详情',
             onclick: () => { selectedId = idea.id; openDetail(); },
           }),
+          h('button', {
+            class: 'btn btn-sm', type: 'button', text: '归档', title: '从创意库与市场隐藏（可恢复）',
+            onclick: async () => {
+              if (!window.confirm(`归档「${idea.name || idea.id}」？将从创意库与市场隐藏，数据保留可恢复。`)) return;
+              await api.post(`/api/ideas/${idea.id}/archive`, { archived: true });
+              toast.ok('已归档（可在需要时恢复）');
+              loadList();
+            },
+          }),
           h('span', { class: 'muted small', text: fmtTime(idea.createdAt) })))));
     }, '创意列表加载失败');
 
@@ -2146,6 +2155,49 @@
     box.append(form);
   }
 
+  /** 全局搜索浮层（跨创意/记忆/Skill 三路聚合） */
+  function initGlobalSearch() {
+    const input = $('#global-search');
+    if (!input) return;
+    const pop = document.createElement('div');
+    pop.className = 'global-search-pop hidden';
+    document.body.append(pop);
+    const close = () => pop.classList.add('hidden');
+    document.addEventListener('click', (ev) => {
+      if (!pop.contains(ev.target) && ev.target !== input) close();
+    });
+    const renderPop = (data) => {
+      const groups = [];
+      if ((data.ideas || []).length) groups.push(
+        h('div', { class: 'search-group-title', text: '创意' }),
+        ...data.ideas.map(i => h('a', { class: 'sidenav', style: 'display:flex;padding:8px 12px;border-radius:8px', href: `#/ideas?id=${i.id}`, onclick: close },
+          h('span', { text: `${i.name || i.id}（${IDEA_STAGE_LABELS[i.stage] || i.stage || '创意'}）` }))));
+      if ((data.memories || []).length) groups.push(
+        h('div', { class: 'search-group-title', text: '记忆' }),
+        ...data.memories.map(m => h('div', { style: 'padding:6px 12px' },
+          h('div', { class: 'small', text: m.content.slice(0, 80) }),
+          h('div', { class: 'muted', style: 'font-size:10px', text: `${m.category} · ${fmtTime(m.createdAt)}` }))));
+      if ((data.skills || []).length) groups.push(
+        h('div', { class: 'search-group-title', text: 'Skill' }),
+        ...data.skills.map(k => h('a', { class: 'sidenav', style: 'display:flex;padding:8px 12px;border-radius:8px', href: '#/skills', onclick: close },
+          h('span', { text: `${k.name} · ${money(k.price)}` }))));
+      render(pop, groups.length ? h('div', { class: 'card section-card', style: 'padding:8px' }, groups)
+        : h('div', { class: 'card section-card', style: 'padding:12px' }, ui.empty('没有匹配的结果')));
+      pop.classList.remove('hidden');
+    };
+    let debounce;
+    input.addEventListener('input', () => {
+      clearTimeout(debounce);
+      const q = input.value.trim();
+      if (!q) { close(); return; }
+      debounce = setTimeout(async () => {
+        try {
+          renderPop(await api.get(`/api/search?q=${encodeURIComponent(q)}&limit=10`));
+        } catch { /* 检索失败静默（401 已由 api 层处理） */ }
+      }, 250);
+    });
+  }
+
   async function initAuth() {
     const badge = $('#user-badge');
     const logoutBtn = $('#logout-btn');
@@ -2163,6 +2215,7 @@
         await fetch(API_BASE + '/api/auth/logout', { method: 'POST' }).catch(() => {});
         location.reload();
       });
+      initGlobalSearch();
       router.start();
     } else {
       badge.textContent = '未登录';

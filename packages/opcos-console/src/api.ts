@@ -1105,6 +1105,7 @@ const API_PATHS = new Set([
   '/api/market/ideas',
   '/api/market/rankings',
   '/api/market/follows',
+  '/api/search',
   '/api/notifications',
   '/api/revenue/daily',
   '/api/subscriptions',
@@ -1754,6 +1755,42 @@ async function dispatchApi(
         community: market.ranking('community' satisfies RankingKey, limit),
         geo: market.ranking('geo' satisfies RankingKey, limit),
       })
+      return
+    }
+
+    case 'GET /api/search': {
+      // 全局检索（跨创意/记忆体/技能）：q 关键词各查一路，聚合返回
+      const q = nonEmptyParam(url.searchParams.get('q'))
+      if (q === undefined) throw new OpcError('VALIDATION_ERROR', 'query parameter q is required')
+      const limit = parseLimit(url.searchParams.get('limit'), 10, 50)
+      const result: {
+        ideas: Array<{ id: string; name: string; stage?: string }>
+        skills: MarketSkill[]
+        memories: MemoryEntry[]
+      } = { ideas: [], skills: [], memories: [] }
+      // 创意：实体名匹配 + 市场摘要
+      if (setup.ideaStore) {
+        result.ideas = setup.ideaStore
+          .listForUser(user?.id ?? '', user ? userTeamIds(setup, user) : [])
+          .filter((i) => !i.archived && (i.name.includes(q) || i.id.includes(q)))
+          .slice(0, limit)
+          .map((i) => ({ id: i.id, name: i.name, stage: i.stage }))
+      }
+      if (setup.ideaMarket) {
+        for (const m of setup.ideaMarket.search({ keyword: q, limit })) {
+          if (!result.ideas.some((i) => i.id === m.ideaId)) {
+            result.ideas.push({ id: m.ideaId, name: m.name, stage: m.stage })
+          }
+        }
+      }
+      // 技能市场
+      result.skills = setup.skillsIndex.search({ keyword: q, limit })
+      // 记忆体（登录态：自己的+共享的）
+      const memory = setup.getService('opc.memory') as MemoryService | undefined
+      if (memory) {
+        result.memories = memory.query({ keyword: q, limit, ...(user ? { owner: user.id } : {}) })
+      }
+      sendJson(req, res, 200, { query: q, ...result })
       return
     }
 
@@ -2521,6 +2558,27 @@ async function dispatchApi(
             authority: 'user',
           })
           sendJson(req, res, 200, result)
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'archive') {
+          // 创意归档/恢复：归档后从默认列表与市场隐藏（数据保留可恢复）
+          if (method !== 'POST') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/archive is not supported`)
+          }
+          const owner = requireUser(user)
+          requireIdeaAccess(setup, owner, ideaId)
+          const body = await readJsonObject(req)
+          const archived = body.archived === undefined ? true : body.archived === true
+          const updated = store.setArchived(ideaId, archived)
+          // 市场联动：归档即下架（恢复不自动重新发布，由用户显式操作）
+          const market = setup.ideaMarket
+          if (archived && market) market.unpublish(ideaId)
+          hub?.write(ideaId, 'decisions', {
+            content: JSON.stringify({ kind: 'archive', archived }),
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, { idea: updated, marketUnpublished: archived && !!market })
           return
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'publish') {

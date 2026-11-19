@@ -27,6 +27,8 @@ export interface Idea {
   ownerId?: string
   /** 所属团队 ID（团队创意：成员均可见可写） */
   teamId?: string
+  /** 归档标记：归档后从默认列表隐藏（数据保留，可恢复） */
+  archived?: boolean
 }
 
 export interface NewIdeaInput {
@@ -49,6 +51,7 @@ interface IdeaRow {
   updated_at: number
   owner_id: string | null
   team_id: string | null
+  archived: number | null
 }
 
 function rowToIdea(row: IdeaRow): Idea {
@@ -61,6 +64,7 @@ function rowToIdea(row: IdeaRow): Idea {
     updatedAt: row.updated_at,
     ...(row.owner_id ? { ownerId: row.owner_id } : {}),
     ...(row.team_id ? { teamId: row.team_id } : {}),
+    ...(row.archived === 1 ? { archived: true } : {}),
   }
 }
 
@@ -235,7 +239,7 @@ export class SqliteIdeaStore {
     `)
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_stage ON ideas (stage, created_at DESC)')
     // 多用户迁移（增量列：老库直接 ALTER，列已存在则忽略）
-    for (const column of ['owner_id', 'team_id']) {
+    for (const column of ['owner_id', 'team_id', 'archived']) {
       try {
         this.db.exec(`ALTER TABLE ideas ADD COLUMN ${column} TEXT`)
       } catch {
@@ -282,7 +286,7 @@ export class SqliteIdeaStore {
 
   get(id: string): Idea | undefined {
     const rows = this.db
-      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas WHERE id = ?')
+      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id, archived FROM ideas WHERE id = ?')
       .all(id) as unknown as IdeaRow[]
     return rows.length > 0 ? rowToIdea(rows[0]) : undefined
   }
@@ -306,25 +310,36 @@ export class SqliteIdeaStore {
   /** 全量列表，新建在前（管理/市场口径；用户可见性走 listForUser） */
   list(): Idea[] {
     const rows = this.db
-      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas ORDER BY created_at DESC')
+      .prepare('SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id, archived FROM ideas ORDER BY created_at DESC')
       .all() as unknown as IdeaRow[]
     return rows.map(rowToIdea)
   }
 
   /**
+  /**
    * 用户可见的创意列表（多用户口径，新建在前）：
    * 我拥有的 ∪ 我所在团队的 ∪ 存量无主（owner_id IS NULL，登录用户均可见）。
+   * 归档项不出现（可用 setArchived 恢复）。
    */
   listForUser(userId: string, teamIds: readonly string[] = []): Idea[] {
     const teamFilter = teamIds.length > 0 ? `OR team_id IN (${teamIds.map(() => '?').join(', ')})` : ''
     const rows = this.db
       .prepare(
-        `SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id FROM ideas
-         WHERE owner_id = ? OR owner_id IS NULL ${teamFilter}
+        `SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id, archived FROM ideas
+         WHERE (owner_id = ? OR owner_id IS NULL ${teamFilter}) AND (archived IS NULL OR archived = 0)
          ORDER BY created_at DESC`,
       )
       .all(...[userId, ...teamIds]) as unknown as IdeaRow[]
     return rows.map(rowToIdea)
+  }
+
+  /** 归档/恢复：归档项从默认列表与市场隐藏，数据保留可恢复 */
+  setArchived(id: string, archived: boolean): Idea {
+    const current = this.require(id)
+    this.db.prepare('UPDATE ideas SET archived = ?, updated_at = ? WHERE id = ?').run(archived ? 1 : 0, this.now(), id)
+    const updated: Idea = { ...current, archived }
+    this.mirrorMeta(updated)
+    return updated
   }
 
   count(): number {
