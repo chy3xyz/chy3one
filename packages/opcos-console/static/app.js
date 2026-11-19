@@ -126,7 +126,8 @@
       h('h2', { class: 'page-title', text: title }),
       desc ? h('p', { class: 'page-desc', text: desc }) : null),
     statCard: (label, value, sub) => h('div', { class: 'card stat-card' },
-      h('div', { class: 'stat-value', text: value }), h('div', { class: 'stat-label', text: label }),
+      h('div', { class: 'stat-value' + (String(value).length > 14 ? ' stat-value-sm' : ''), text: value }),
+      h('div', { class: 'stat-label', text: label }),
       sub ? h('div', { class: 'stat-sub', text: sub }) : null),
     sectionCard: (title, ...children) => h('div', { class: 'card section-card' },
       title ? h('h3', { class: 'card-title', text: title }) : null, ...children),
@@ -1199,6 +1200,7 @@
         templatesBox.classList.remove('hidden');
       }
     });
+    render(resultBox, ui.empty('输入创业目标并点击「组队开工」，虚拟团队的角色卡会出现在这里'));
     render(box,
       ui.pageTitle('AI 组队', '虚拟 AI 团队替你干活——与「协作团队」的真人协作分开'),
       ui.sectionCard(null,
@@ -1744,10 +1746,11 @@
         show: money(s.creator + s.platform),
       })));
     }, '收入趋势加载失败');
+    render(detailBox, ui.empty('点击上方创作者卡片，即可展开其分成流水明细'));
     render(box,
       ui.pageTitle('创作者中心', '你赚到的每一笔，都在这里'),
       ui.sectionCard('近 30 天收入趋势（按日聚合）', trendBox),
-      listBox,
+      ui.sectionCard('创作者分成账户', listBox),
       ui.sectionCard(null, detailTitle, detailBox));
     await Promise.all([loadCreators(), loadTrend()]);
   };
@@ -1763,7 +1766,7 @@
       const s = await api.get('/api/bills/summary');
       render(buyerSelect, h('option', { value: '', text: '从已成交买家中选择…' }),
         ...((s && s.buyers) || []).map(b => h('option', { value: b.buyerId, text: `${b.buyerId}（${money(b.spent)}）` })));
-      if (!s || (!s.totalBuyers && !s.totalOrders)) return ui.empty('还没有客户消费记录');
+      if (!s || (!s.totalBuyers && !s.totalOrders)) return ui.empty('还没有客户消费记录——在「订单交易」创建第一笔订单后，这里会出现消费汇总');
       return h('div', { class: 'card-grid' }, [
         ui.statCard('总买家数（已成交）', num(s.totalBuyers)),
         ui.statCard('总订单 · 支付成功口径', `${num(s.totalOrders)} 笔`, '含其后退款（stats.totalPaid）'),

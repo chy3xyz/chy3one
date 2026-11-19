@@ -227,6 +227,8 @@ code { font-family: var(--mono); }
 
 .stat-card { padding: 14px 16px; }
 .stat-value { font-size: 24px; font-weight: 700; color: var(--opc-on-primary); line-height: 1.25; }
+/* 长文本值（完整时间戳等）自动缩小，避免大字号换行撑破卡片 */
+.stat-value.stat-value-sm { font-size: 15px; line-height: 1.4; word-break: break-all; }
 .stat-label { margin-top: 4px; font-size: 12px; color: var(--opc-muted); }
 .stat-sub { margin-top: 2px; font-size: 11px; color: var(--opc-muted); opacity: 0.85; }
 
