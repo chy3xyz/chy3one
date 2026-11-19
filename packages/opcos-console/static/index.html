@@ -11,24 +11,21 @@
   <!-- 服务不可用时的整页横幅（app.js 探活失败时显示） -->
   <div id="health-banner" class="health-banner hidden" role="alert">控制台暂时够不到后端——创意和收入数据都安全，恢复后自动续上</div>
 
-  <!-- 顶部导航栏：系统名 + 状态徽标 -->
-  <header class="topbar">
-    <div class="brand">
-      <svg class="brand-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1 3 9h4l-1 6 6-8H8z"/></svg>
-      <div class="brand-text">
-        <h1>OPC-OS 控制台</h1>
-        <p>创意变现操作系统 · 让每个创意都有收入</p>
-      </div>
-    </div>
-    <span id="status-badge" class="badge badge-muted">连接中…</span>
-    <input id="global-search" class="input" placeholder="全局搜索：创意 / 记忆 / Skill…（回车检索）" style="max-width:280px;margin-left:auto;margin-right:12px">
-    <span id="user-badge" class="badge badge-muted hidden"></span>
-    <button id="logout-btn" class="btn btn-sm hidden" type="button">退出登录</button>
-  </header>
-
-  <!-- 左侧垂直导航 + 主区面板（hash 路由，刷新保持） -->
+  <!-- 外壳：左侧全高纯黑导航栏 + 右侧白色主列（hash 路由，刷新保持） -->
   <div class="layout">
+
+    <!-- 纯黑侧栏：品牌 + 分组导航 + 用户区 -->
     <nav class="sidenav" id="sidenav" aria-label="子系统导航">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1 3 9h4l-1 6 6-8H8z"/></svg>
+        </div>
+        <div class="brand-text">
+          <b>OPC-OS 控制台</b>
+          <span>Creative Monetization OS</span>
+        </div>
+      </div>
+
       <div class="nav-group">工作台</div>
       <a href="#/overview" data-route="overview">
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
@@ -98,13 +95,26 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 14c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/></svg>
         <span>账户</span>
       </a>
+
+      <!-- 侧栏底部用户区（app.js 只改 textContent / hidden，位置无关） -->
+      <div class="rail-foot">
+        <div class="av" id="user-av" aria-hidden="true">O</div>
+        <span id="user-badge" class="who hidden"></span>
+        <button id="logout-btn" class="btn btn-sm rail-logout hidden" type="button">退出</button>
+      </div>
     </nav>
 
-    <main id="main" class="main"></main>
+    <!-- 白色主列：顶栏（状态 + 全局搜索） + 面板 + 运行时信息 -->
+    <div class="main-col">
+      <header class="topbar">
+        <span id="status-badge" class="badge badge-muted">连接中…</span>
+        <div class="topbar-spacer"></div>
+        <input id="global-search" class="input search-input" placeholder="全局搜索：创意 / 记忆 / Skill…（回车检索）">
+      </header>
+      <main id="main" class="main"></main>
+      <footer class="footer" id="footer">运行时信息加载中…</footer>
+    </div>
   </div>
-
-  <!-- 底部运行时信息（/api/health：cordis 版本 / 已装载插件数） -->
-  <footer class="footer" id="footer">运行时信息加载中…</footer>
 
   <!-- 全局 toast 容器 -->
   <div id="toasts" class="toasts" aria-live="polite"></div>

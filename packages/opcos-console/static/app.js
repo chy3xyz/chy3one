@@ -123,6 +123,7 @@
   /* ===== ui 组件 ===== */
   const ui = {
     pageTitle: (title, desc) => h('div', { class: 'page-head' },
+      h('div', { class: 'ep', text: 'OPC-OS · 创意变现操作系统' }),
       h('h2', { class: 'page-title', text: title }),
       desc ? h('p', { class: 'page-desc', text: desc }) : null),
     statCard: (label, value, sub) => h('div', { class: 'card stat-card' },
@@ -452,6 +453,8 @@
 
   /* ===== 面板：我的创意（prd2.md M1：创意一等公民 + 三域 + 独立记忆体挂载） ===== */
   const IDEA_STAGE_LABELS = { description: '创意描述', product: '创意产品', operation: '产品运营', asset: '产品资产' };
+  // 阶段 → 模块色块（原型设计语言：描述→丁香紫 · 产品→奶油黄 · 运营→珊瑚 · 资产→柠檬绿）
+  const IDEA_STAGE_VARIANTS = { description: 'info', product: 'warn', operation: 'coral', asset: 'lime' };
   const IDEA_STAGES = ['description', 'product', 'operation', 'asset'];
   const DOMAIN_LABELS = { problem: '问题域', solution: '解决域', spacetime: '时空域' };
   const DOMAIN_KEYS = ['problem', 'solution', 'spacetime'];
@@ -489,7 +492,7 @@
       return h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
         h('div', { class: 'memory-head' },
           h('strong', { text: idea.name || idea.id }),
-          ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', 'info')),
+          ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
         h('p', { class: 'memory-content', text: (idea.domains && idea.domains.problem.summary) || '三域草案待完善' }),
         h('div', { class: 'toolbar-actions' },
           h('button', {
@@ -1022,7 +1025,7 @@
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
             h('h3', { class: 'card-title', text: idea.name }),
-            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, 'ok')),
+            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
           stepper,
           h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
           tabBar,
@@ -1062,7 +1065,7 @@
       ? h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
           h('div', { class: 'memory-head' },
             h('strong', { text: idea.name }),
-            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, 'info')),
+            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
           h('p', { class: 'memory-content', text: idea.problemSummary || idea.solutionSummary || '—' }),
           h('div', { class: 'stat-sub' },
             `关注 ${num(idea.followers)} · 资产 ${money(idea.financeTotalCents)} · GEO ${Math.round((idea.geoVisibility || 0) * 100)}%`),
@@ -2378,6 +2381,9 @@
     if (currentUser) {
       badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
       badge.classList.remove('hidden');
+      // 侧栏头像首字母（昵称/用户名的第一个字符）
+      const av = $('#user-av');
+      if (av) av.textContent = (currentUser.displayName || currentUser.username || 'O').trim().slice(0, 1).toUpperCase();
       logoutBtn.classList.remove('hidden');
       logoutBtn.addEventListener('click', async () => {
         await fetch(API_BASE + '/api/auth/logout', { method: 'POST' }).catch(() => {});
