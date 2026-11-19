@@ -841,3 +841,12 @@ body.login-mode .login-wrap { min-height: calc(100vh - var(--topbar-h)); }
   max-height: 70vh; overflow: auto;
 }
 .global-search-pop .search-group-title { font-size: 11px; letter-spacing: .1em; opacity: .6; margin: 10px 4px 4px; }
+
+/* toast 操作链接与加载 spinner */
+.toast-action { color: #7dd3fc; text-decoration: underline; margin-left: 8px; white-space: nowrap; }
+.spinner {
+  display: inline-block; width: 14px; height: 14px; margin-right: 6px;
+  border: 2px solid rgba(125, 211, 252, 0.3); border-top-color: #7dd3fc;
+  border-radius: 50%; animation: opc-spin 0.8s linear infinite; vertical-align: -2px;
+}
+@keyframes opc-spin { to { transform: rotate(360deg); } }

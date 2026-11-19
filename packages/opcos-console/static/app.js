@@ -48,18 +48,33 @@
     box.append(...children.flat(2).filter(c => c !== null && c !== undefined && c !== false));
   };
 
-  /* ===== toast ===== */
+  /* ===== toast（支持操作链接：message + {label, href, onclick}） ===== */
   const toast = (() => {
-    function show(message, type, ms) {
+    function show(message, type, ms, action) {
+      const actionLink = action ? h('a', {
+        class: 'toast-action',
+        href: action.href || 'javascript:void(0)',
+        onclick: (ev) => {
+          ev.preventDefault();
+          node.remove();
+          if (action.onclick) action.onclick();
+          else if (action.href && action.href.startsWith('#')) location.hash = action.href;
+        },
+      }, action.label || '前往') : null;
       const node = h('div', { class: `toast toast-${type}` },
-        h('span', { class: 'toast-dot' }), h('span', { class: 'toast-msg', text: message }));
+        h('span', { class: 'toast-dot' }),
+        h('span', { class: 'toast-msg', text: message }),
+        actionLink);
       $('#toasts').append(node);
-      setTimeout(() => { node.classList.add('toast-out'); setTimeout(() => node.remove(), 350); }, ms);
+      setTimeout(() => { node.classList.add('toast-out'); setTimeout(() => node.remove(), 350); }, action ? ms + 3000 : ms);
     }
     return {
       ok: m => show(m, 'ok', 3500),
       err: m => show(m, 'err', 6000),
       info: m => show(m, 'info', 4000),
+      /** 带操作链接的成功提示：toast.okAction('已发布', { label: '去市场', href: '#/market' }) */
+      okAction: (m, action) => show(m, 'ok', 8000, action),
+      infoAction: (m, action) => show(m, 'info', 8000, action),
     };
   })();
 
@@ -166,7 +181,9 @@
   /** 面板数据装载：loading → 内容 / 失败空态 */
   async function loadInto(box, loadingText, fn, errText) {
     box.innerHTML = '';
-    box.append(ui.loading(loadingText));
+    const loading = ui.loading(loadingText);
+    loading.prepend(Object.assign(document.createElement('span'), { className: 'spinner' }));
+    box.append(loading);
     try {
       render(box, await fn());
     } catch {
@@ -584,7 +601,7 @@
           const roles = [...roleSelect.selectedOptions].map(o => o.value);
           const res = await api.post(`/api/ideas/${idea.id}/workspace/agent-run`, { roles: roles.length ? roles : undefined });
           toast.ok(res.hint || `Agent 开发完成：产出 ${res.files.length} 个文件`);
-          if (res.draftName) toast.info(`Skill 草案 ${res.draftName} 已注册，去 Skill 市场上架`);
+          if (res.draftName) toast.infoAction(`Skill 草案 ${res.draftName} 已注册`, { label: '去上架 →', onclick: () => { location.hash = '#/skills'; } });
           renderMvp(sg, null);
           // 刷新工作区文件列表（同一页签内）
           api.get(`/api/ideas/${idea.id}/workspace`).then(fresh => renderWs(fresh && fresh.root, (fresh && fresh.files) || [])).catch(() => {});
@@ -797,7 +814,7 @@
         const publishBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '发布到市场' });
         busyBtn(publishBtn, '发布中…', async () => {
           const res = await api.post(`/api/ideas/${idea.id}/publish`, {});
-          toast.ok(`已发布到创意市场：发现 ${res.relations.length} 条关联`);
+          toast.okAction(`已发布到创意市场：发现 ${res.relations.length} 条关联`, { label: '去市场看榜单 →', onclick: () => { location.hash = '#/market'; } });
           renderRelations(res.relations, []);
         });
         const collabUser = h('input', { class: 'input', placeholder: '协作者 ID（如 user-y）' });
@@ -1095,7 +1112,7 @@
       }
     });
     render(box,
-      ui.pageTitle('AI 组队', '说一句目标，AI 团队替你把活干了'),
+      ui.pageTitle('AI 组队', '虚拟 AI 团队替你干活——与「协作团队」的真人协作分开'),
       ui.sectionCard(null,
         ui.toolbar(ui.grow(ui.field('创业目标', goalInput)), ui.actions(submitBtn)),
         h('p', { class: 'muted', text: '解析失败时将降级为行业模板选择（跨境电商创业团队、独立开发者团队等）。' })),
@@ -1145,7 +1162,8 @@
         buttons.push(actionBtn('完成', async () => {
           // 内联表单替换原生弹窗：在该行下方展开，填交付结果
           const inline = openInlineForm(t.id, '完成任务', '交付结果 result，如：已完成并附链接', (value) => mutate('complete', { result: value || '已完成' }), () => {
-            toast.ok(`任务完成：${t.title}`);
+            sessionStorage.setItem('billing-prefill', JSON.stringify({ taskId: t.id, agentId: t.claimedBy || member() }));
+            toast.okAction(`任务完成：${t.title}`, { label: '去结算 →', onclick: () => { location.hash = '#/billing'; } });
             load();
           });
           inline.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1704,6 +1722,17 @@
       agentIdInput = h('input', { class: 'input', value: 'customer-service-acme', placeholder: '数字员工 agentId' }),
       resolutionSelect = h('select', { class: 'input' },
         h('option', { value: 'resolved', text: 'resolved · 自主解决（计费）' }),
+    // 跨面板联动预填：任务板完成 → 去结算（taskId/agentId 自动带入）
+    (() => {
+      try {
+        const prefill = JSON.parse(sessionStorage.getItem('billing-prefill') || 'null');
+        if (prefill && prefill.taskId) {
+          taskIdInput.value = prefill.taskId;
+          if (prefill.agentId) agentIdInput.value = prefill.agentId;
+          sessionStorage.removeItem('billing-prefill');
+        }
+      } catch { /* 预填失败保持默认 */ }
+    })(),
         h('option', { value: 'escalated', text: 'escalated · 转人工（免费）' })),
       completeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '结算这一单' }),
       resultBox = h('div'), summaryBox = h('div');
@@ -1909,7 +1938,9 @@
     const categorySelect = h('select', { class: 'input' },
         MEMORY_CATEGORIES.map(c => h('option', { value: c, text: `${ASSET_LABELS[c]}（${c}）` }))),
       scopeSelect = h('select', { class: 'input' },
-        ['global', 'workflow', 'agent'].map(s => h('option', { value: s, text: s }))),
+        h('option', { value: 'global', text: '全局（global）' }),
+        h('option', { value: 'workflow', text: '工作流（workflow）' }),
+        h('option', { value: 'agent', text: '智能体（agent）' })),
       contentInput = h('textarea', { class: 'input', rows: 3, placeholder: '要沉淀的资产内容（创意、爆款模式、教训…）' }),
       confidenceInput = h('input', { class: 'input', type: 'number', min: '0', max: '1', step: '0.05', value: '0.8' }),
       writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '存为资产' });
