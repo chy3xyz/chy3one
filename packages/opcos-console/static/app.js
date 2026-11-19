@@ -446,7 +446,6 @@
       loadHealth(),
       loadTelemetry(),
       loadTrend(),
-      loadNotif(),
     ]);
   };
 
