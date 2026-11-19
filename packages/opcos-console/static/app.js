@@ -498,11 +498,12 @@
           }),
           h('button', {
             class: 'btn btn-sm', type: 'button', text: '归档', title: '从创意库与市场隐藏（可恢复）',
-            onclick: async () => {
-              if (!window.confirm(`归档「${idea.name || idea.id}」？将从创意库与市场隐藏，数据保留可恢复。`)) return;
-              await api.post(`/api/ideas/${idea.id}/archive`, { archived: true });
-              toast.ok('已归档（可在需要时恢复）');
-              loadList();
+            onclick: () => {
+              openInlineForm(`archive-${idea.id}`, `归档「${idea.name || idea.id}」`, '', () =>
+                api.post(`/api/ideas/${idea.id}/archive`, { archived: true }), () => {
+                toast.ok('已归档（可在需要时恢复）');
+                loadList();
+              }, { noInput: true, confirmText: '确认归档', danger: '将从创意库与市场隐藏，数据保留可恢复' });
             },
           }),
           h('span', { class: 'muted small', text: fmtTime(idea.createdAt) })))));
