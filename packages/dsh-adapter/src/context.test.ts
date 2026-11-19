@@ -129,10 +129,13 @@ test('compat: dsh-agent-loop waterfall 接管点与载荷字段（锁 ARD-005 �
   for (const hook of ['agent/pre-step', 'agent/request', 'agent/request-error']) {
     assert.ok(loopSrc.includes(`"${hook}"`), `waterfall hook ${hook} missing — DSH API 漂移，需更新 packages/dsh-adapter`)
   }
-  // pre-step 载荷字段与 enter/reject 决策形状（计费埋点读取这些字段）
+  // pre-step 载荷字段与 enter/reject 决策形状（计费埋点读取 messages 字段；
+  // 0.2 线新增 modelSelection，billing 不消费该字段，无影响）
   assert.match(loopSrc, /waterfall\("agent\/pre-step", \{\s*messages: claimed/)
   assert.match(loopSrc, /kind: "enter"/)
   assert.match(loopSrc, /decision\.kind === "reject"/)
-  // request 载荷含 provider/model（model 适配器插桩依据）
-  assert.match(loopSrc, /proposedConfig\.provider \|\|/)
+  // request 载荷含 provider/model（模型适配器插桩依据；0.2 线从
+  // proposedConfig.provider 变为 request.provider，model 经 modelSelection 携带）
+  assert.match(loopSrc, /provider: request\.provider/)
+  assert.match(loopSrc, /model: request\.model/)
 })

@@ -139,13 +139,15 @@ interface BillingEvent {
 
 ## 7. DSH 版本基线与同步升级策略
 
-### 7.1 当前基线（2026-09-15，rc.2 升级后）
+### 7.1 当前基线（2026-11-19，0.2.2-rc.5 升级后）
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| `@deepseek-ai/dsh` | 0.1.5-rc.2 | `next` 通道最新；与全部 web 子包（web-app/webserver/client-modules 等）同版本对齐 |
-| `@deepseek-ai/cordis` | 4.0.2 | 插件运行时，最新 stable |
+| `@deepseek-ai/dsh` | 0.2.2-rc.5 | 0.2 大版本线（2026-11-19 由 0.1.5-rc.2→0.1.7-rc.2→0.2.2-rc.5 三级连升）；全家桶子包对齐 0.2.2-rc.5 |
+| `@deepseek-ai/cordis` | 4.1.0 | 插件运行时（0.2 线 dsh 要求 ~4.1.0，需 --legacy-peer-deps 越过 0.1.7 全家桶的 ~4.0.4 peer 锁） |
 | Node.js | ≥ 22.19 | engines 约束 |
+
+> **0.2 升级实测（2026-11-19）**：① cordis 4.1 与 0.1.7 全家桶 peer 冲突 → `--legacy-peer-deps` 越过后全家桶对齐 0.2.2-rc.5 自然满足；② compat 门禁唯一漂移点：request 载荷 provider/model 从 `proposedConfig.provider` 变为 `request.provider`/`request.model`（pre-step 新增 modelSelection 字段，billing 不消费无影响）；③ 三接管点与 enter/reject 决策形状未变，367 项测试 + 12 步 demo 零适配通过。
 
 > **版本判断要点（实测教训）**：官方 `latest` dist-tag 会滞后（dsh 的 latest 曾停在 rc.1，dsh-web 的 latest 甚至停在 0.0.1-rc.1）。判断"是否最新"要对比 `npm view <pkg> dist-tags` 的 `latest`+`next`+`alpha` 与已装版本，而非只看 latest。升级通道约定：`next`（rc）跟进，`alpha` 跳过；rc.1→rc.2 升级经 compat 门禁零适配通过，隔离层按预期工作。
 
