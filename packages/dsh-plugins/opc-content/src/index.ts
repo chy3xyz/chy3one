@@ -20,6 +20,7 @@ import {
 import { TemplateTopicStrategy, TemplateWriteStrategy, type PublishAdapter, type ReviewStrategy, type TopicStrategy, type WriteStrategy } from '../../../core/src/content/strategy.js'
 import { WebSearchTopicSource, looksLikeWebSearchService } from '../../../core/src/content/web-topic.js'
 import { JsonlMemoryStore, type MemoryStore } from '../../../core/src/index.js'
+import { existsSync, readFileSync } from 'node:fs'
 import { createTelemetryBus, defineOpcPlugin, type OpcContext, type TelemetryBus } from '../../../dsh-adapter/src/index.js'
 
 export const name = 'opc-content'
@@ -66,6 +67,8 @@ export interface ContentService {
   setIdeaMemoryResolver?(resolver: (ideaId: string) => MemoryStore | undefined): void
   /** CO-05 爆款模板沉淀出口注入口（可选；控制台层写入创意记忆体 facts 流） */
   setTemplateSink?(sink: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void): void
+  /** 发布历史正本（runsFile JSONL 倒序；可选——未配置 runsFile 时返回空） */
+  history?(limit?: number): Array<{ ideaId: string | null; title: string; platform: string; url: string; success: boolean; ranAt: number }>
   /** 人设记忆直通（七类 MemoryCategory，与 core MemoryStore 同形） */
   readonly memory: MemoryStore
   /** 观测用：run 调用计数（含失败） */
@@ -131,6 +134,26 @@ export function apply(ctx: OpcContext, config: Config) {
     /** CO-05 爆款模板沉淀出口接线（可选；控制台层注入创意记忆体 facts 流写入器） */
     setTemplateSink(sink) {
       pipeline.setTemplateSink(sink)
+    },
+    /** 发布历史正本（runsFile JSONL 倒序；未配置 runsFile 时返回空） */
+    history(limit = 50) {
+      if (!config.runsFile || !existsSync(config.runsFile)) return []
+      const out = []
+      for (const line of readFileSync(config.runsFile, 'utf8').split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const rec = JSON.parse(line)
+          out.push({
+            ideaId: rec.ideaId ?? null,
+            title: rec.brief?.title ?? '',
+            platform: rec.publish?.platform ?? '',
+            url: rec.publish?.url ?? '',
+            success: rec.success ?? false,
+            ranAt: rec.ranAt ?? 0,
+          })
+        } catch { /* 坏行跳过 */ }
+      }
+      return out.reverse().slice(0, limit)
     },
     memory,
     stats: () => ({ runs }),

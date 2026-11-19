@@ -1897,16 +1897,31 @@
         renderStats(statsRes, events);
       } catch { /* 轮询失败静默，保留上一帧 */ }
     };
+    const historyBox = h('div');
+    const loadHistory = () => loadInto(historyBox, null, async () => {
+      const res = await api.get('/api/content/history?limit=50');
+      const items = (res && res.history) || [];
+      if (!items.length) return ui.empty('还没有发布记录——第一篇作品发布后这里会累积成作品库');
+      return ui.table(['标题', '平台', '时间', '链接'], items.map(h2 => [
+        h('span', { text: h2.title || '—' }),
+        PLATFORM_LABELS[h2.platform] || h2.platform || '—',
+        fmtTime(h2.ranAt),
+        h2.url ? h('a', { href: h2.url, target: '_blank', rel: 'noopener noreferrer', text: '查看' }) : '—',
+      ]));
+    }, '发布历史加载失败');
+
     render(box,
       ui.pageTitle('出作品', '把创意变成能发布、能涨粉的作品'),
       ui.sectionCard('运行流水线',
         ui.toolbar(ui.field('用哪个创意的人设（CO-02）', ideaSelect), ui.actions(runBtn),
           h('span', { class: 'muted small', text: '指定创意则用该创意记忆体的人设与选题；默认五平台分发（CO-03）。配置 DeepSeek API Key 后走 LLM 撰写。' })),
         resultBox),
+      ui.sectionCard('发布历史（作品库）', historyBox),
       h('div', { class: 'two-col' },
         ui.sectionCard('最近发布事件（10s 自动刷新）', eventsBox),
         ui.sectionCard('运行统计', statsBox)));
     await quiet();
+    loadHistory();
     autoPoll(eventsBox, quiet);
   };
 

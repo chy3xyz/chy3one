@@ -159,6 +159,8 @@ interface ContentService {
   setIdeaMemoryResolver?(resolver: (ideaId: string) => unknown): void
   /** CO-05 爆款模板沉淀出口注入口（可选） */
   setTemplateSink?(sink: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void): void
+  /** 发布历史正本（runsFile JSONL 倒序；可选） */
+  history?(limit?: number): Array<{ ideaId: string | null; title: string; platform: string; url: string; success: boolean; ranAt: number }>
 }
 
 /** GEO 监测服务（opc.geo 的结构子集，prd2.md 4.4） */
@@ -1086,6 +1088,7 @@ const API_PATHS = new Set([
   '/api/content/run',
   '/api/content/stats',
   '/api/content/events',
+  '/api/content/history',
   '/api/skills',
   '/api/skills/install',
   '/api/skills/publish-draft',
@@ -1302,6 +1305,16 @@ async function dispatchApi(
     case 'GET /api/content/stats': {
       const content = requireService<ContentService>(setup, 'opc.content')
       sendJson(req, res, 200, { ...content.stats(), mode: content.mode() })
+      return
+    }
+
+    case 'GET /api/content/history': {
+      // 发布历史正本（作品库）：runsFile JSONL 倒序（CO-04 表现回流的持久化依托）
+      const content = requireService<ContentService>(setup, 'opc.content')
+      const limit = parseLimit(url.searchParams.get('limit'), 50, 200)
+      sendJson(req, res, 200, {
+        history: content.history ? content.history(limit) : [],
+      })
       return
     }
 
