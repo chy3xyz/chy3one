@@ -1153,6 +1153,7 @@ const API_PATHS = new Set([
   '/api/subscriptions/auto-renew',
   '/api/funnel',
   '/api/overview',
+  '/api/export',
 ])
 
 /**
@@ -2141,6 +2142,31 @@ async function dispatchApi(
       const days = parseLimit(url.searchParams.get('days'), 14, 90)
       const series = setup.funnelSnapshots?.trendByDay(days) ?? []
       sendJson(req, res, 200, { series })
+      return
+    }
+
+    case 'GET /api/export': {
+      // 数据导出（JSON 全量：创意+资产+记忆+市场+订单——登录用户自己的数据）
+      const owner = requireUser(user)
+      const result: Record<string, unknown> = { exportedAt: new Date().toISOString(), owner: owner.username }
+      const ideaStore = setup.ideaStore
+      if (ideaStore) {
+        const teamIds = userTeamIds(setup, owner)
+        result.ideas = ideaStore.listForUser(owner.id, teamIds).map(idea => {
+          const home = ideaStore.homeDir(idea.id)
+          const ledger = home ? IdeaLedger.forIdeaHome(home, idea.id).read() : null
+          const versions = ideaStore.listVersions(idea.id)
+          return { ...idea, ledger, versions }
+        })
+      }
+      if (setup.ideaMarket) {
+        result.market = setup.ideaMarket.list()
+      }
+      const memory = setup.getService('opc.memory') as MemoryService | undefined
+      if (memory) {
+        result.memories = memory.query({ owner: owner.id, limit: 1000 })
+      }
+      sendJson(req, res, 200, result)
       return
     }
 
