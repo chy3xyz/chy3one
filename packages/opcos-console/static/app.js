@@ -191,6 +191,21 @@
     }
   }
   const onEnter = (input, fn) => input.addEventListener('keydown', ev => { if (ev.key === 'Enter') fn(); });
+  /** 数字输入即时校验：非法时红框 + 提示（提交时后端仍是最终校验） */
+  function bindNumberCheck(input, { min, max, integer = false } = {}) {
+    const check = () => {
+      const v = input.value.trim();
+      if (v === '') { input.classList.remove('input-invalid'); input.title = ''; return; }
+      const n = Number(v);
+      const bad = !Number.isFinite(n)
+        || (integer && !Number.isInteger(n))
+        || (min !== undefined && n < min)
+        || (max !== undefined && n > max);
+      input.classList.toggle('input-invalid', bad);
+      input.title = bad ? '数值超出有效范围' : '';
+    };
+    input.addEventListener('input', check);
+  }
   /** 面板轮询：每 ms 执行 fn；面板切走（box 脱离文档）后自动清理定时器 */
   function autoPoll(box, fn, ms = 10000) {
     const timer = setInterval(() => {
@@ -640,6 +655,7 @@
           h('option', { value: 'feedback', text: '用户反馈' }),
           h('option', { value: 'metric', text: '数据指标' }));
         const vScore = h('input', { class: 'input', type: 'number', min: '0', max: '5', step: '0.5', placeholder: '评分 0-5（可选）' });
+        bindNumberCheck(vScore, { min: 0, max: 5 });
         const vContent = h('input', { class: 'input', placeholder: '验证结论，如：12 人内测，10 人愿付费' });
         const vBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '记一条验证' });
         busyBtn(vBtn, '记录中…', async () => {
@@ -806,6 +822,7 @@
         const tokenRoleSelect = h('select', { class: 'input' },
           (tk && tk.roles || []).map(r => h('option', { value: r.role, text: `${r.label}（${r.role}）` })));
         const tokenAmountInput = h('input', { class: 'input', type: 'number', min: '1', step: '1', placeholder: '积分数量' });
+        bindNumberCheck(tokenAmountInput, { min: 1, integer: true });
         const tokenReasonInput = h('input', { class: 'input', placeholder: '事由，如：MVP 测试反馈' });
         const tokenIssueBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '发放积分' });
         busyBtn(tokenIssueBtn, '发放中…', async () => {
@@ -1519,6 +1536,7 @@
       const s = skillMeta.get(skillSelect.value);
       if (s && s.price != null) amountInput.value = String(s.price);
     });
+    bindNumberCheck(amountInput, { min: 1, integer: true });
     async function loadSkillOptions() {
       try {
         const data = await api.get('/api/skills?limit=100');
@@ -2011,6 +2029,7 @@
       contentInput = h('textarea', { class: 'input', rows: 3, placeholder: '要沉淀的资产内容（创意、爆款模式、教训…）' }),
       confidenceInput = h('input', { class: 'input', type: 'number', min: '0', max: '1', step: '0.05', value: '0.8' }),
       writeBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '存为资产' });
+    bindNumberCheck(confidenceInput, { min: 0, max: 1 });
     busyBtn(writeBtn, '写入中…', async () => {
       const content = contentInput.value.trim();
       if (!content) return toast.err('请填写资产内容');

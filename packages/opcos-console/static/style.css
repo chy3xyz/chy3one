@@ -857,3 +857,6 @@ body.login-mode .login-wrap { min-height: calc(100vh - var(--topbar-h)); }
   font-size: 10px; font-weight: 600; line-height: 1.4;
   background: #f59e0b; color: #1c1917;
 }
+
+/* 数字输入即时校验：非法值红框 */
+.input-invalid { border-color: #f87171 !important; }
