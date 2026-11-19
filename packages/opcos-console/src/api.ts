@@ -1109,6 +1109,7 @@ const API_PATHS = new Set([
   '/api/revenue/daily',
   '/api/subscriptions',
   '/api/subscriptions/status',
+  '/api/subscriptions/auto-renew',
   '/api/funnel',
   '/api/overview',
 ])
@@ -1497,6 +1498,22 @@ async function dispatchApi(
         throw new OpcError('VALIDATION_ERROR', 'query parameter buyerId is required')
       }
       sendJson(req, res, 200, { subscriptions: subscriptions.listByBuyer(buyerId) })
+      return
+    }
+
+    case 'POST /api/subscriptions/auto-renew': {
+      // SM-04：自动续订开关（登录态强制本人）
+      const owner = requireUser(user)
+      const subscriptions = requireSubscriptions(setup)
+      const body = await readJsonObject(req)
+      const skillId = requireString(body, 'skillId')
+      const enabled = body.enabled === undefined ? true : body.enabled === true
+      subscriptions.setAutoRenew(owner.username, skillId, enabled)
+      const status = subscriptions.statusOf(owner.username, skillId)
+      sendJson(req, res, 200, {
+        buyerId: owner.username, skillId, autoRenew: enabled,
+        active: status.active, expiresAt: status.subscription?.expiresAt,
+      })
       return
     }
 

@@ -28,6 +28,8 @@ export interface Subscription {
   expiresAt: number
   /** 关联订单（本次激活/续费对应的支付凭证） */
   orderId?: string
+  /** 自动续订开关（到期后由自动续费流程扣款顺延；默认开） */
+  autoRenew?: boolean
 }
 
 export interface SubscriptionStatus {
@@ -37,7 +39,7 @@ export interface SubscriptionStatus {
 
 function rowToSubscription(row: {
   id: string; skill_id: string; version: string; buyer_id: string; period: string
-  started_at: number; expires_at: number; order_id: string | null
+  started_at: number; expires_at: number; order_id: string | null; auto_renew: number
 }): Subscription {
   return {
     id: row.id,
@@ -48,6 +50,7 @@ function rowToSubscription(row: {
     startedAt: row.started_at,
     expiresAt: row.expires_at,
     ...(row.order_id ? { orderId: row.order_id } : {}),
+    ...(row.auto_renew === 0 ? { autoRenew: false } : {}),
   }
 }
 
@@ -81,12 +84,19 @@ export class SubscriptionStore {
         period     TEXT NOT NULL,
         started_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
-        order_id   TEXT
+        order_id   TEXT,
+        auto_renew INTEGER NOT NULL DEFAULT 1
       )
     `)
     this.db.exec(
       'CREATE INDEX IF NOT EXISTS idx_subs_buyer ON subscriptions (buyer_id, skill_id, expires_at DESC)',
     )
+    // 老库增量迁移：auto_renew 列（1=开，0=关）
+    try {
+      this.db.exec('ALTER TABLE subscriptions ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 1')
+    } catch {
+      /* 列已存在（重复打开同一库） */
+    }
   }
 
   /**
@@ -99,6 +109,8 @@ export class SubscriptionStore {
     buyerId: string
     period: SubscriptionPeriod
     orderId?: string
+    /** 自动续订开关（续订继承既有值；首订缺省开） */
+    autoRenew?: boolean
   }): Subscription {
     if (!input.skillId || !input.buyerId) {
       throw new OpcError('VALIDATION_ERROR', 'skillId and buyerId are required')
@@ -116,14 +128,20 @@ export class SubscriptionStore {
       startedAt: now,
       expiresAt: base + days * DAY_MS,
       ...(input.orderId ? { orderId: input.orderId } : {}),
+      ...(input.autoRenew !== undefined
+        ? { autoRenew: input.autoRenew }
+        : latest && latest.autoRenew !== undefined
+          ? { autoRenew: latest.autoRenew }
+          : { autoRenew: true }),
     }
     this.db
       .prepare(
-        'INSERT INTO subscriptions (id, skill_id, version, buyer_id, period, started_at, expires_at, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO subscriptions (id, skill_id, version, buyer_id, period, started_at, expires_at, order_id, auto_renew) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         subscription.id, subscription.skillId, subscription.version, subscription.buyerId,
         subscription.period, subscription.startedAt, subscription.expiresAt, subscription.orderId ?? null,
+        subscription.autoRenew === false ? 0 : 1,
       )
     return subscription
   }
@@ -132,7 +150,7 @@ export class SubscriptionStore {
   private latest(buyerId: string, skillId: string): Subscription | undefined {
     const rows = this.db
       .prepare(
-        'SELECT id, skill_id, version, buyer_id, period, started_at, expires_at, order_id FROM subscriptions WHERE buyer_id = ? AND skill_id = ? ORDER BY expires_at DESC LIMIT 1',
+        'SELECT id, skill_id, version, buyer_id, period, started_at, expires_at, order_id, auto_renew FROM subscriptions WHERE buyer_id = ? AND skill_id = ? ORDER BY expires_at DESC LIMIT 1',
       )
       .all(buyerId, skillId) as unknown as Parameters<typeof rowToSubscription>[0][]
     return rows.length > 0 ? rowToSubscription(rows[0]) : undefined
@@ -145,11 +163,38 @@ export class SubscriptionStore {
     return { active: latest.expiresAt > this.now(), subscription: latest }
   }
 
+  /**
+   * 待自动续订清单（SM-04 自动续费数据源）：auto_renew 开启且已到期的订阅。
+   * 读取时懒过滤（不改写历史行）。
+   */
+  dueForRenewal(now: number): Array<Subscription & { autoRenew: boolean }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, skill_id, version, buyer_id, period, started_at, expires_at, order_id, auto_renew
+         FROM subscriptions
+         WHERE auto_renew = 1 AND expires_at <= ?
+         ORDER BY expires_at`,
+      )
+      .all(now) as unknown as Parameters<typeof rowToSubscription>[0][]
+    return rows
+      .map((row) => ({ ...rowToSubscription(row), autoRenew: true }))
+  }
+
+  /** 开关某条订阅的自动续订（控制台开关；按买家+技能的最新窗口） */
+  setAutoRenew(buyerId: string, skillId: string, enabled: boolean): void {
+    const latest = this.latest(buyerId, skillId)
+    if (!latest) throw new OpcError('NOT_FOUND', `no subscription for ${buyerId}/${skillId}`)
+    this.db
+      .prepare('UPDATE subscriptions SET auto_renew = ? WHERE buyer_id = ? AND skill_id = ?')
+      .run(enabled ? 1 : 0, buyerId, skillId)
+    // config() 读取端走 DB 行（readTokenConfig 语义），此处无需内存镜像
+  }
+
   /** 买家全部订阅（到期时间倒序；active 为懒判定结果） */
   listByBuyer(buyerId: string): Array<Subscription & { active: boolean }> {
     const rows = this.db
       .prepare(
-        'SELECT id, skill_id, version, buyer_id, period, started_at, expires_at, order_id FROM subscriptions WHERE buyer_id = ? ORDER BY expires_at DESC',
+        'SELECT id, skill_id, version, buyer_id, period, started_at, expires_at, order_id, auto_renew FROM subscriptions WHERE buyer_id = ? ORDER BY expires_at DESC',
       )
       .all(buyerId) as unknown as Parameters<typeof rowToSubscription>[0][]
     const now = this.now()

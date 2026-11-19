@@ -1544,9 +1544,22 @@
             loadSubs();
           } catch { renewBtn.disabled = false; renewBtn.textContent = s.active ? '续订' : '重新订阅'; }
         });
-        return [s.skillId, PERIOD_LABELS[s.period] || s.period, fmtTime(s.expiresAt), statusCell, renewBtn];
+        return [s.skillId, PERIOD_LABELS[s.period] || s.period, fmtTime(s.expiresAt), statusCell, renewBtn, { autoRenew: s.autoRenew !== false }];
       });
-      return ui.table(['Skill', '周期', '到期时间', '状态', '操作'], rows);
+      return ui.table(['Skill', '周期', '到期时间', '状态', '自动续订', '操作'], rows.map(r => [
+        ...r,
+        h('label', { style: 'display:inline-flex;align-items:center;gap:4px;cursor:pointer' },
+          h('input', { type: 'checkbox', checked: r[5].autoRenew !== false, onchange: async (ev) => {
+            try {
+              await fetch(API_BASE + '/api/subscriptions/auto-renew', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ skillId: r.skillId, enabled: ev.target.checked }),
+              });
+              toast.ok(ev.target.checked ? '自动续订已开启：到期将按市场价自动顺延' : '自动续订已关闭');
+              loadSubs();
+            } catch { /* api 层已 toast */ }
+          } })),
+      ]));
     }, '订阅加载失败');
     subRefreshBtn.addEventListener('click', loadSubs);
     render(box,

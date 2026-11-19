@@ -35,6 +35,7 @@ import {
   UserStore,
   LoginLockout,
 } from '../../core/src/index.js'
+import { runAutoRenewalPass } from './auto-renew.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -166,6 +167,42 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     marketRoot: join(dataDir, 'ideas-market'),
   })
   const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
+
+  // SM-04 订阅自动续费（每日 pass）：到期且 auto_renew 开启 → 按市场价下单并支付
+  //（Mock 通道语义）顺延权益；单条失败不阻断，异常只记日志
+  const ordersEngine = ctx.get('opc.marketplace.orders') as
+    | {
+        createOrder(input: { skillId: string; version: string; buyerId: string; amount: number; authorId?: string }): { id: string }
+        markPaid(orderId: string, paymentRef: string): unknown
+      }
+    | undefined
+  let renewTimer: ReturnType<typeof setInterval> | undefined
+  if (subscriptions && ordersEngine) {
+    renewTimer = setInterval(() => {
+      try {
+        runAutoRenewalPass({
+          subscriptions,
+          orders: {
+            createOrder: (input: { skillId: string; version: string; buyerId: string; amount: number; authorId?: string }) => ({
+              id: ordersEngine!.createOrder(input).id,
+              amount: input.amount,
+            }),
+            markPaid: (orderId: string, ref: string) => void ordersEngine!.markPaid(orderId, ref),
+          },
+          skills: {
+            get: (skillId: string) => {
+              const entry = index.get(skillId)
+              return entry ? { price: entry.price, version: entry.version } : undefined
+            },
+          },
+          now: Date.now,
+        })
+      } catch (error) {
+        console.error('[opcos-console] auto-renew pass failed:', error instanceof Error ? error.message : error)
+      }
+    }, 86_400_000)
+    renewTimer.unref?.()
+  }
   // 多用户身份层（生产默认开启；opts.auth=false 仅为本地兼容测试保留 v1 行为）
   const auth =
     opts.auth === false
@@ -222,6 +259,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
         if (entry) ctx.registry.delete(entry.plugin)
       }
     }
+    if (renewTimer) clearInterval(renewTimer)
     ideaStore.close()
     bodyIndex.close()
     ideaMarket.close()

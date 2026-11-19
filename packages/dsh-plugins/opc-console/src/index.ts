@@ -29,6 +29,7 @@ import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
 
 import { defineOpcPlugin, type OpcContext, type TelemetryEvent } from '../../../dsh-adapter/src/index.js'
+import { runAutoRenewalPass } from '../../../opcos-console/src/auto-renew.js'
 import {
   MemoryBodyHub,
   MemoryBodyIndex,
@@ -178,7 +179,13 @@ function createSetup(ctx: OpcContext, dataDir: string, userAuth?: boolean): Cons
           lockout: new LoginLockout(),
         }
 
-  // 会话过期日清（resolve 已惰性清理单条；此处兜底批量回收，防止长期运行缓慢膨胀）
+  // 会话过期日清 + SM-04 订阅自动续费（共用 24h 节拍；单条失败不阻断）
+  const ordersEngineForRenew = ctx.getService('opc.marketplace.orders') as
+    | {
+        createOrder(input: { skillId: string; version: string; buyerId: string; amount: number; authorId?: string }): { id: string }
+        markPaid(orderId: string, paymentRef: string): unknown
+      }
+    | undefined
   let purgeTimer: ReturnType<typeof setInterval> | undefined
   if (auth) {
     purgeTimer = setInterval(() => {
@@ -186,6 +193,26 @@ function createSetup(ctx: OpcContext, dataDir: string, userAuth?: boolean): Cons
         auth.sessions.purgeExpired()
       } catch {
         /* 清理失败不影响主流程（下次日清重试） */
+      }
+      if (!subscriptions || !ordersEngineForRenew || !index) return
+      try {
+        runAutoRenewalPass({
+          subscriptions,
+          orders: {
+            createOrder: (input: { skillId: string; version: string; buyerId: string; amount: number; authorId?: string }) =>
+              ({ id: ordersEngineForRenew.createOrder(input).id, amount: input.amount }),
+            markPaid: (orderId: string, ref: string) => void ordersEngineForRenew.markPaid(orderId, ref),
+          },
+          skills: {
+            get: (skillId: string) => {
+              const entry = index.get(skillId)
+              return entry ? { price: entry.price, version: entry.version } : undefined
+            },
+          },
+          now: Date.now,
+        })
+      } catch (error) {
+        console.error('[opc-console] auto-renew pass failed:', error instanceof Error ? error.message : error)
       }
     }, 86_400_000)
     purgeTimer.unref?.()

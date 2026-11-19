@@ -77,3 +77,26 @@ test('subscriptions: 重启恢复（重开同一库权益与顺延基准不丢�
   assert.equal(renewed.expiresAt, sub.expiresAt + PERIOD_DAYS.monthly * DAY, '重启后续费仍从到期时间顺延')
   reopened.close()
 })
+
+test('subscriptions: dueForRenewal/setAutoRenew——自动续费数据源与开关', () => {
+  let clock = 5_000_000
+  const store = new SubscriptionStore(join(dir, 'auto-renew.db'), () => clock)
+  store.activate({ skillId: 'skill-ar', version: '1.0.0', buyerId: 'buyer-ar', period: 'monthly', autoRenew: false })
+  clock += 31 * DAY_MS
+  // 关闭自动续订的到期订阅不在清单
+  assert.equal(store.dueForRenewal(clock).length, 0)
+  store.setAutoRenew('buyer-ar', 'skill-ar', true)
+  // 到期后进入清单
+  const due = store.dueForRenewal(clock)
+  assert.equal(due.length, 1)
+  assert.equal(due[0]?.autoRenew, true)
+  // 未到期的不在清单
+  store.activate({ skillId: 'skill-live', version: '1.0.0', buyerId: 'buyer-ar', period: 'monthly' })
+  assert.equal(store.dueForRenewal(clock).filter((s) => s.skillId === 'skill-live').length, 0)
+  // 关闭不存在的订阅 404
+  assert.throws(
+    () => store.setAutoRenew('buyer-none', 'skill-none', true),
+    (e: { code?: string }) => e.code === 'NOT_FOUND',
+  )
+  store.close()
+})
