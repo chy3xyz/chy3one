@@ -51,6 +51,7 @@ import {
   DOMAIN_LABELS,
   IDEA_MEMORY_STREAMS,
   IDEA_STAGES,
+  DEV_ROLES,
   validateDomains,
   type BillingRecord,
   type BlackboardEntry,
@@ -77,6 +78,7 @@ import {
   type Team,
   type TeamMember,
   type TeamRole,
+  type DevRole,
   type ThreeDomains,
   type User,
   type WriteResult,
@@ -155,6 +157,8 @@ interface ContentService {
   readonly memory: MemoryService
   /** 每创意人设记忆解析器注入口（CO-02，插件缺席/旧版本时可选） */
   setIdeaMemoryResolver?(resolver: (ideaId: string) => unknown): void
+  /** CO-05 爆款模板沉淀出口注入口（可选） */
+  setTemplateSink?(sink: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void): void
 }
 
 /** GEO 监测服务（opc.geo 的结构子集，prd2.md 4.4） */
@@ -833,6 +837,20 @@ function wireIdeaMemory(setup: ConsoleSetup, content: ContentService): void {
     if (!setup.ideaStore?.get(ideaId)) return undefined
     return new IdeaMemoryBridge(setup.memoryHub!, ideaId)
   })
+  // CO-05 爆款模板沉淀出口：E-E-A-T 全达标的内容写入该创意记忆体 facts 流
+  if (typeof content.setTemplateSink === 'function') {
+    content.setTemplateSink((ideaId: string, template) => {
+      try {
+        setup.memoryHub?.write(ideaId, 'facts', {
+          content: JSON.stringify(template),
+          confidence: 0.85,
+          authority: 'model',
+        })
+      } catch {
+        /* 记忆体写入失败不影响发布主流程 */
+      }
+    })
+  }
 }
 
 /** 从 research 流正本回读 MVP 验证记录（kind=mvp-validation 的结构化 JSON 条目） */
@@ -2293,30 +2311,81 @@ async function dispatchApi(
             }
             const ws = new IdeaWorkspace(workspacePathFor(ideaHome))
             const runner = resolveDshAgentRunner({ getService: setup.getService, cwd: ws.path })
-            const result = await runAgentDev(idea, plan, ws, {
-              execute: async (task) => {
-                if (!runner) {
-                  // 记录式降级：任务书落盘（AGENT-TASK.md），Agent 会话留待宿主接入
-                  return {
-                    mode: 'recorded' as const,
-                    output: '宿主未提供 agents 服务（未运行 dsh 或非 DSH 宿主）：任务书已落盘 AGENT-TASK.md，可在 DSH 会话中按任务书执行',
-                    files: [{ path: 'AGENT-TASK.md', content: task.prompt }],
+            // 多角色协作开发（body.roles，缺省单开发者）；每角色一份角色化任务书，产出合并落盘
+            const rolesInput = Array.isArray(body.roles) ? body.roles : []
+            const roles = rolesInput.length > 0
+              ? (rolesInput.map((r) => String(r)).filter((r) => r in DEV_ROLES) as DevRole[])
+              : (['developer'] as DevRole[])
+            if (roles.length === 0) roles.push('developer')
+            const startedAt = Date.now()
+            const roleResults: Array<{ role: string; output: string; sessionId?: string; files: string[]; mode: string }> = []
+            const writeDecision = (id: string, content: string) => {
+              hub.write(id, 'decisions', { content, confidence: 0.85, authority: 'model' })
+            }
+            for (const role of roles) {
+              const result = await runAgentDev(idea, plan, ws, {
+                execute: async (task) => {
+                  if (!runner) {
+                    // 记录式降级：角色任务书落盘（AGENT-TASK-<role>.md），Agent 会话留待宿主接入
+                    return {
+                      mode: 'recorded' as const,
+                      output: '宿主未提供 agents 服务（未运行 dsh 或非 DSH 宿主）：任务书已落盘，可在 DSH 会话中按任务书执行',
+                      files: [{ path: `AGENT-TASK-${role}.md`, content: task.prompt }],
+                    }
                   }
-                }
-                const outcome = await runner(task.prompt)
-                return { ...outcome, files: [] } // 真实 Agent 自行在工作区写文件（cwd 注入）
-              },
-              writeDecision: (id, content) => {
-                hub.write(id, 'decisions', { content, confidence: 0.85, authority: 'model' })
-              },
-            })
+                  const outcome = await runner(task.prompt)
+                  return { ...outcome, files: [] } // 真实 Agent 自行在工作区写文件（cwd 注入）
+                },
+                writeDecision,
+              })
+              roleResults.push({
+                role,
+                output: result.output,
+                sessionId: result.sessionId,
+                files: result.files,
+                mode: result.mode,
+              })
+            }
+            const allFiles = [...new Set(roleResults.flatMap((r) => r.files))]
+            const anySpawned = roleResults.some((r) => r.mode === 'spawned')
+            // 开发→蒸馏串联：完成后自动注册 Skill 草案（归属该创意），上架仍需人工确认
+            let draftName: string | undefined
+            const forge = setup.getService('opc.skillforge') as
+              | { addDraft?: (skill: SkillDefinition) => void; listDrafts?: () => SkillDefinition[] }
+              | undefined
+            if (anySpawned && forge?.addDraft && forge.listDrafts) {
+              draftName = `agent-dev-${ideaId}-${forge.listDrafts().length + 1}`
+              forge.addDraft({
+                name: draftName,
+                version: '1.0.0',
+                memorySnapshot: [
+                  { layer: 'lesson', content: roleResults.map((r) => `${r.role}: ${r.output.slice(0, 120)}`).join(' | ') },
+                ],
+                skillDefinition: {
+                  trigger: plan.features[0] ?? idea.name,
+                  toolSequence: ['design', 'implement', 'verify'],
+                  postConditions: plan.features.join('；'),
+                },
+              })
+              hub.write(ideaId, 'decisions', {
+                content: JSON.stringify({ kind: 'skill-draft', name: draftName, source: 'agent-dev' }),
+                confidence: 0.8,
+                authority: 'model',
+              })
+            }
             sendJson(req, res, 200, {
-              ...result,
-              files: result.files.length > 0 ? result.files : ws.list(),
+              ideaId,
+              roles: roleResults,
+              mode: anySpawned ? 'spawned' : 'recorded',
+              files: allFiles.length > 0 ? allFiles : ws.list(),
+              draftName,
               workspace: { root: ws.path },
+              durationMs: Date.now() - startedAt,
               hint:
-                result.mode === 'spawned'
-                  ? 'DSH Agent 已在创意工作区完成开发任务'
+                anySpawned
+                  ? draftName
+                    ? `多角色 Agent 开发完成（${roles.join('/')}），Skill 草案 ${draftName} 已注册——去 Skill 市场上架`
+                    : `多角色 Agent 开发完成（${roles.join('/')}）`
                   : '已记录任务书到工作区（宿主未暴露 Agent 服务）；接入 DSH 后可真实拉起',
             })
             return
@@ -2513,7 +2582,28 @@ async function dispatchApi(
             const avg = result.snapshots.reduce((sum, s) => sum + s.visibility, 0) / result.snapshots.length
             IdeaLedger.forIdeaHome(home, ideaId).updateAnalytics({ geo_visibility: Math.round(avg * 100) / 100 })
           }
-          sendJson(req, res, 200, result)
+          // GEO 下跌自动修正（CO-04 联动）：有告警时自动跑一次修正内容并发布，正本留痕
+          let remediation: unknown
+          if (result.alerts.length > 0 && body.autoRemediate !== false) {
+            const content = setup.getService('opc.content') as ContentService | undefined
+            if (content) {
+              wireIdeaMemory(setup, content)
+              const runResult = await content.run(ideaId)
+              const dispatch = await new MultiPlatformDispatcher(defaultPlatformAdapters(PLATFORMS)).dispatch(runResult.content)
+              remediation = { run: runResult, dispatch }
+              requireMemoryHub(setup).write(ideaId, 'decisions', {
+                content: JSON.stringify({
+                  kind: 'geo-remediation',
+                  alerts: result.alerts.map((a) => ({ platform: a.platform, drop: a.drop })),
+                  title: runResult.brief.title,
+                  published: runResult.success,
+                }),
+                confidence: 0.85,
+                authority: 'model',
+              })
+            }
+          }
+          sendJson(req, res, 200, { ...result, remediation })
           return
         }
         throw new OpcError('NOT_FOUND', `no such path: ${path}`)

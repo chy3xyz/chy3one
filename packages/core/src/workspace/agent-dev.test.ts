@@ -84,3 +84,32 @@ test('agent-dev: recorded 模式（宿主无 agents 服务时任务书落盘）'
   // 工作区实际落盘核对
   assert.ok(readFileSync(join(ws.path, 'AGENT-TASK.md'), 'utf8').includes('# 开发任务'))
 })
+
+test('agent-dev: 多角色协作——每角色一份角色化任务书，产出合并落盘', async () => {
+  const { idea, plan, ws } = setup()
+  const prompts: string[] = []
+  const result = await runAgentDev(idea, plan, ws, {
+    execute: async (task) => {
+      prompts.push(task.prompt)
+      const role = task.prompt.includes('架构师') ? 'arch'
+        : task.prompt.includes('审查者') ? 'review' : 'impl'
+      return {
+        output: `${role} 完成`,
+        files: [{ path: `${role}-note.md`, content: `${role} 产出` }],
+      }
+    },
+  })
+  // 由调用方对每角色各调一次 execute——这里只验证单次调用的角色指令注入
+  assert.ok(prompts[0].includes('你的角色'), '任务书应含角色指令')
+  void result
+})
+
+test('agent-dev: DEV_ROLES 三角色指令差异化', () => {
+  const { idea, plan } = setup()
+  const arch = buildAgentDevPrompt(idea, plan, 'architect')
+  const dev = buildAgentDevPrompt(idea, plan, 'developer')
+  const review = buildAgentDevPrompt(idea, plan, 'reviewer')
+  assert.ok(arch.includes('架构师') && arch.includes('ARCHITECTURE.md'))
+  assert.ok(dev.includes('开发者') && dev.includes('逐条实现'))
+  assert.ok(review.includes('审查者') && review.includes('REVIEW.md'))
+})

@@ -73,6 +73,12 @@ export interface ContentPipelineOptions {
   writeStrategy?: WriteStrategy
   reviewStrategy?: ReviewStrategy
   publishAdapter?: PublishAdapter
+  /**
+   * CO-05 爆款模板沉淀出口（可选）：ideaId 运行且 E-E-A-T 四维全达标时，
+   * 把该篇内容（标题/角度/正文节选/合规分）交给此回调——控制台层写入创意记忆体
+   * facts 流（kind:content-template），供模板复用。
+   */
+  templateSink?: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void
 }
 
 /** 策略替换口（真实 LLM 注入位），全部可独立覆盖 */
@@ -127,6 +133,11 @@ export class ContentPipeline {
   /** 运行期注入每创意人设记忆解析器（CO-02；undefined 移除，回退全局记忆） */
   setIdeaMemoryResolver(resolver: ((ideaId: string) => MemoryStore | undefined) | undefined): void {
     this.options.ideaMemoryResolver = resolver
+  }
+
+  /** 运行期注入爆款模板沉淀出口（CO-05；undefined 移除） */
+  setTemplateSink(sink: NonNullable<ContentPipelineOptions['templateSink']> | undefined): void {
+    this.options.templateSink = sink
   }
 
   /**
@@ -207,6 +218,32 @@ export class ContentPipeline {
       },
       timestamp: Date.now(),
     })
+
+    // CO-05 爆款模板沉淀（prd2.md）：发布成功 + E-E-A-T 全达标 → 内容写入创意记忆体
+    // facts 流（kind:content-template），供同类创意/后续选题复用
+    if (ideaId !== undefined && this.options.templateSink && review.eeat?.every((c) => c.present)) {
+      this.options.templateSink(ideaId, {
+        kind: 'content-template',
+        title: draft.title,
+        angle: brief.angle,
+        score: review.score,
+        content: draft.body.slice(0, 1500),
+        at: Date.now(),
+      })
+    }
+
+    // CO-05 爆款模板沉淀（prd2.md）：发布成功 + E-E-A-T 全达标 → 内容写入创意记忆体
+    // facts 流（kind:content-template），供同类创意/后续选题复用
+    if (ideaId !== undefined && this.options.templateSink && review.eeat?.every((c) => c.present)) {
+      this.options.templateSink(ideaId, {
+        kind: 'content-template',
+        title: draft.title,
+        angle: brief.angle,
+        score: review.score,
+        content: draft.body.slice(0, 1500),
+        at: Date.now(),
+      })
+    }
 
     this.appendRun(result)
     return result

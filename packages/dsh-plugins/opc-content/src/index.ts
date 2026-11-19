@@ -64,6 +64,8 @@ export interface ContentService {
   setStrategies(overrides: StrategySet): void
   /** 每创意人设记忆解析器注入口（CO-02；可选——旧宿主/测试可不调用） */
   setIdeaMemoryResolver?(resolver: (ideaId: string) => MemoryStore | undefined): void
+  /** CO-05 爆款模板沉淀出口注入口（可选；控制台层写入创意记忆体 facts 流） */
+  setTemplateSink?(sink: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void): void
   /** 人设记忆直通（七类 MemoryCategory，与 core MemoryStore 同形） */
   readonly memory: MemoryStore
   /** 观测用：run 调用计数（含失败） */
@@ -125,6 +127,10 @@ export function apply(ctx: OpcContext, config: Config) {
     },
     setIdeaMemoryResolver(resolver) {
       pipeline.setIdeaMemoryResolver(resolver)
+    },
+    /** CO-05 爆款模板沉淀出口接线（可选；控制台层注入创意记忆体 facts 流写入器） */
+    setTemplateSink(sink) {
+      pipeline.setTemplateSink(sink)
     },
     memory,
     stats: () => ({ runs }),

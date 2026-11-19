@@ -565,11 +565,17 @@
           toast.ok('MVP 方案已生成，正本已存入决策记忆');
           renderMvp(sg, res.plan);
         });
-        // DSH Agent 开发执行（IP-02）：按 MVP 方案拉起 Agent 在创意工作区产出脚手架
+        // DSH Agent 开发执行（IP-02）：可选多角色协作（架构师/开发者/审查者）
+        const roleSelect = h('select', { class: 'input', multiple: true, size: '3' },
+          h('option', { value: 'developer', text: '开发者（实现功能）', selected: true }),
+          h('option', { value: 'architect', text: '架构师（骨架+接口）' }),
+          h('option', { value: 'reviewer', text: '审查者（走查报告）' }));
         const devBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '启动 Agent 开发', title: '按 MVP 方案拉起 DSH Agent 在工作区开发（宿主无 Agent 服务时落盘任务书）' });
         busyBtn(devBtn, 'Agent 开发中…（真实模式可能需要数分钟）', async () => {
-          const res = await api.post(`/api/ideas/${idea.id}/workspace/agent-run`, {});
+          const roles = [...roleSelect.selectedOptions].map(o => o.value);
+          const res = await api.post(`/api/ideas/${idea.id}/workspace/agent-run`, { roles: roles.length ? roles : undefined });
           toast.ok(res.hint || `Agent 开发完成：产出 ${res.files.length} 个文件`);
+          if (res.draftName) toast.info(`Skill 草案 ${res.draftName} 已注册，去 Skill 市场上架`);
           renderMvp(sg, null);
           // 刷新工作区文件列表（同一页签内）
           api.get(`/api/ideas/${idea.id}/workspace`).then(fresh => renderWs(fresh && fresh.root, (fresh && fresh.files) || [])).catch(() => {});
@@ -851,6 +857,7 @@
               ui.toolbar(ui.actions(planBtn, devBtn),
                 h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
               mvpBox,
+              ui.sectionCard('Agent 开发角色（多选，可组合）', roleSelect),
               ui.toolbar(ui.field('来源', vSource), ui.field('评分', vScore), ui.grow(ui.field('结论', vContent)), ui.actions(vBtn))),
             ui.sectionCard('工作区（MVP 开发文件）', wsBox)),
           h('div', { 'data-tab': 'ops', class: 'hidden' },
@@ -1513,33 +1520,33 @@
       const res = await api.get(`/api/subscriptions?buyerId=${encodeURIComponent(buyerId)}`);
       const subs = (res && res.subscriptions) || [];
       if (!subs.length) return ui.empty('暂无订阅——购买订阅制 Skill 后自动生效');
-      return ui.table(['Skill', '周期', '到期时间', '状态', '操作'], subs.map(s => [
-        s.skillId,
-        PERIOD_LABELS[s.period] || s.period,
-        fmtTime(s.expiresAt),
-        s.active ? ui.badge('生效中', 'ok') : ui.badge('已到期', 'err'),
-        (() => {
-          const btn = h('button', { class: 'btn btn-sm', type: 'button', text: s.active ? '续订' : '重新订阅' });
-          btn.addEventListener('click', async () => {
-            btn.disabled = true; btn.textContent = '续订中…';
-            try {
-              const detail = await api.get(`/api/skills/${s.skillId}`);
-              const order = await api.post('/api/orders', {
-                skillId: s.skillId,
-                version: (detail.skill && detail.skill.version) || '1.0.0',
-                buyerId,
-                amountCents: (detail.skill && detail.skill.price) || 990,
-              });
-              const paid = await api.post('/api/orders/pay', { orderId: order.id });
-              toast.ok(paid.subscription
-                ? `续订成功，权益至 ${fmtTime(paid.subscription.expiresAt)}`
-                : '支付成功');
-              loadSubs();
-            } catch { btn.disabled = false; btn.textContent = s.active ? '续订' : '重新订阅'; }
-          });
-          return btn;
-        })(),
-      ]));
+      const rows = subs.map(s => {
+        const daysLeft = Math.ceil((s.expiresAt - Date.now()) / 86_400_000);
+        const expiringSoon = s.active && daysLeft <= 7;
+        const statusCell = s.active
+          ? (expiringSoon ? ui.badge(`剩 ${daysLeft} 天`, 'warn') : ui.badge('生效中', 'ok'))
+          : ui.badge('已到期', 'err');
+        const renewBtn = h('button', { class: 'btn btn-sm', type: 'button', text: s.active ? '续订' : '重新订阅' });
+        renewBtn.addEventListener('click', async () => {
+          renewBtn.disabled = true; renewBtn.textContent = '续订中…';
+          try {
+            const detail = await api.get(`/api/skills/${s.skillId}`);
+            const order = await api.post('/api/orders', {
+              skillId: s.skillId,
+              version: (detail.skill && detail.skill.version) || '1.0.0',
+              buyerId,
+              amountCents: (detail.skill && detail.skill.price) || 990,
+            });
+            const paid = await api.post('/api/orders/pay', { orderId: order.id });
+            toast.ok(paid.subscription
+              ? `续订成功，权益至 ${fmtTime(paid.subscription.expiresAt)}`
+              : '支付成功');
+            loadSubs();
+          } catch { renewBtn.disabled = false; renewBtn.textContent = s.active ? '续订' : '重新订阅'; }
+        });
+        return [s.skillId, PERIOD_LABELS[s.period] || s.period, fmtTime(s.expiresAt), statusCell, renewBtn];
+      });
+      return ui.table(['Skill', '周期', '到期时间', '状态', '操作'], rows);
     }, '订阅加载失败');
     subRefreshBtn.addEventListener('click', loadSubs);
     render(box,

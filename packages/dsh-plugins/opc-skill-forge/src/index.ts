@@ -41,6 +41,8 @@ export interface SkillForgeService {
   listDrafts(): SkillDefinition[]
   /** 打包草案为 .dshpkg 信封（SF-04） */
   packageDraft(skill: SkillDefinition, authorId: string): SkillPackage
+  /** 程序化注册草案（Agent 开发流水线等非观测来源；可选——旧宿主可不实现） */
+  addDraft?(skill: SkillDefinition): void
 }
 
 /** 真实 DSH 'session/event' firehose 的事件切片（emit 模式，listener(session, event)） */
@@ -103,6 +105,10 @@ export function apply(ctx: OpcContext, config: Config) {
     },
     listDrafts: () => [...drafts],
     packageDraft: (skill, authorId) => createPackage(skill, authorId).pkg,
+    /** 程序化注册草案（来源：Agent 开发流水线等非观测途径；不触发蒸馏埋点） */
+    addDraft: (skill) => {
+      drafts.push(skill)
+    },
   }
 
   ctx.provideService('opc.skillforge', service)

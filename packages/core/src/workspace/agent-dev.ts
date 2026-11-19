@@ -39,18 +39,39 @@ export interface AgentDevResult {
 }
 
 export interface AgentDevDeps {
-  /** Agent 执行器：注入 opc-team 的 spawn 能力或测试桩；返回产出文件与总结文本（mode 缺省 spawned） */
+  /** Agent 执行器：注入 opc-team 的 spawn 能力或测试桩；返回产出文件与总结文本（mode 缺省 spawned）。
+   *  多角色时由调用方对每个角色各调一次（prompt 已含角色指令）。 */
   execute: (task: AgentDevTask) => Promise<{ output: string; sessionId?: string; files: AgentDevFile[]; mode?: 'spawned' | 'recorded' }>
   /** 决策正本写入（创意记忆体 decisions 流；缺席时跳过） */
   writeDecision?: (ideaId: string, content: string) => void
   now?: () => number
 }
 
+/** 开发角色（多角色协作开发；单角色传 ['developer'] 等价于全栈） */
+export type DevRole = 'architect' | 'developer' | 'reviewer'
+
+export const DEV_ROLES: Record<DevRole, { label: string; directive: string }> = {
+  architect: {
+    label: '架构师',
+    directive: '你的角色：架构师——只产出架构与骨架（目录结构、接口定义、模块划分文档 ARCHITECTURE.md 与空实现文件），不写具体业务逻辑。',
+  },
+  developer: {
+    label: '开发者',
+    directive: '你的角色：开发者——按功能清单逐条实现可运行代码，每个功能对应一个模块文件与最小验证入口。',
+  },
+  reviewer: {
+    label: '审查者',
+    directive: '你的角色：审查者——产出 REVIEW.md：对照功能清单逐条检查实现完备度、列出问题清单与修复建议；不修改代码。',
+  },
+}
+
 /** 从 MVP 方案 + 三域组装开发任务书（结构化、自包含——子代理看不到控制台上下文） */
-export function buildAgentDevPrompt(idea: Idea, plan: MvpPlan): string {
+export function buildAgentDevPrompt(idea: Idea, plan: MvpPlan, role: DevRole = 'developer'): string {
   const d = idea.domains
   return [
     `# 开发任务：${idea.name}`,
+    '',
+    DEV_ROLES[role].directive,
     '',
     '## 背景三域',
     `- 问题域：${d.problem.summary}`,
