@@ -85,6 +85,7 @@ import {
 } from '../../core/src/index.js'
 import type { PipelineRunResult } from '../../core/src/content/pipeline.js'
 import { createPackage, type Ed25519KeyPair, type SkillPackage } from '../../core/src/skill/packager.js'
+import { computeHealthScore } from '../../core/src/idea/idea-health.js'
 import { resolveDshAgentRunner } from '../../dsh-adapter/src/index.js'
 import type { TelemetryBus, TelemetryEvent } from '../../dsh-adapter/src/index.js'
 import { detectDshRuntime } from '../../dsh-adapter/src/index.js'
@@ -2689,6 +2690,40 @@ async function dispatchApi(
             authority: 'user',
           })
           sendJson(req, res, 200, result)
+          return
+        }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'health') {
+          // 创意健康评分——变现准备度四维诊断
+          if (method !== 'GET') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/health is not supported`)
+          }
+          const idea = store.require(ideaId)
+          const hub = requireMemoryHub(setup)
+          // 验证条数与平均分（research/mvp 流）
+          const validationEntries = hub.query({ ideaIds: [ideaId], stream: 'decisions', limit: 50 })
+            .filter(e => e.content.includes('"kind":"mvp-plan"'))
+          const mvpValidations = hub.query({ ideaIds: [ideaId], stream: 'research', limit: 100 })
+            .filter(e => e.content.includes('"source":"feedback"') || e.content.includes('"source":"metric"'))
+          // 账本
+          const ideaHome = store.homeDir(ideaId)
+          const assets = ideaHome ? IdeaLedger.forIdeaHome(ideaHome, ideaId).read().assets : null
+          // 市场发布
+          const marketEntry = setup.ideaMarket?.get(ideaId)
+          const report = computeHealthScore({
+            idea,
+            planCount: validationEntries.length,
+            validations: mvpValidations.length,
+            avgValidationScore: mvpValidations.length > 0
+              ? mvpValidations.reduce((sum, e) => {
+                  try { return sum + (JSON.parse(e.content).score ?? 3) } catch { return sum + 3 }
+                }, 0) / mvpValidations.length
+              : undefined,
+            contentCount: setup.contentEvents.filter(ev => ev.type === 'content_publish' && (ev.payload as any)?.ideaId === ideaId).length,
+            financeTotalCents: assets?.finance.total ?? 0,
+            tokensDistributed: assets?.tokens.distributed ?? 0,
+            published: !!marketEntry,
+          })
+          sendJson(req, res, 200, { health: report, suggestion: requireLifecycle(setup).canTransition(ideaId, 'product') ? '可推进到产品阶段' : '' })
           return
         }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'archive') {

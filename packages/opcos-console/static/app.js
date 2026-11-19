@@ -922,6 +922,23 @@
           ['market', '市场与协同'],
           ['memory', '记忆体·工作区'],
         ];
+          // 健康评分
+          const healthBox = h('div');
+          const renderHealth = (health) => {
+            if (!health) { render(healthBox, ui.empty('加载健康评分…')); return; }
+            const dims = health.dimensions.map(d2 => [
+              d2.label, `${d2.score}/${d2.max}`,
+              d2.suggestions.length ? d2.suggestions[0] : '—',
+            ]);
+            render(healthBox,
+              h('div', { class: 'card-grid' },
+                ui.statCard('健康总分', `${health.score}/100`, health.verdict),
+                ...health.dimensions.map(d2 => ui.statCard(d2.label, `${d2.score}/${d2.max}`,
+                  d2.suggestions.length ? d2.suggestions[0] : '达成'))),
+              dims && dims.length ? ui.table(['维度', '得分', '改进建议'], dims) : null);
+          };
+          api.get(`/api/ideas/${idea.id}/health`).then(res => renderHealth(res.health)).catch(() => renderHealth(null));
+
         const detailBody = h('div', { id: 'idea-detail-body' },
           h('div', { 'data-tab': 'domains' },
             h('div', { class: 'card-grid' }, domainCards),
@@ -929,6 +946,7 @@
               h('p', { class: 'muted small', style: 'margin:0 0 6px', text: '三域每次迭代自动入链；回滚会把当前三域先存为新版本，可随时再撤销。' }),
               versionsBox)),
           h('div', { 'data-tab': 'mvp', class: 'hidden' },
+            ui.sectionCard('创意健康评分', healthBox),
             ui.sectionCard('MVP 方案与验证（阶段二）',
               ui.toolbar(ui.actions(planBtn, devBtn),
                 h('span', { class: 'muted small', text: '方案基于三域生成；每条验证都会更新 Go/No-Go 建议。' })),
@@ -2204,9 +2222,38 @@
       toast.info('改密即可全端下线：请使用下方「修改密码」完成该操作');
     });
 
+    // 模型凭据设置（消除 SSH 配 key 门槛）
+    const keyStatus = h('span', { class: 'badge badge-muted', text: '读取中…' });
+    const keyInput = h('input', { class: 'input', type: 'password', placeholder: '粘贴 DeepSeek API Key（sk-…）' });
+    const keyBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存并生效' });
+    const loadKeyStatus = () => loadInto(keyStatus.parentNode || keyStatus, null, async () => {
+      // keyStatus 位置由下方 render 设置；此处只更新文本
+    }, '凭据状态加载失败');
+    api.get('/api/settings').then(res => {
+      keyStatus.textContent = res.modelKeyConfigured
+        ? `已配置（${res.modelKeyMasked}）`
+        : '未配置';
+      keyStatus.className = `badge ${res.modelKeyConfigured ? 'badge-ok' : 'badge-warn'}`;
+    }).catch(() => { keyStatus.textContent = '读取失败'; });
+    busyBtn(keyBtn, '保存中…', async () => {
+      const key = keyInput.value.trim();
+      if (!key) return toast.err('先粘贴 API Key');
+      const res = await api.post('/api/settings/model-key', { apiKey: key });
+      toast.ok(res.hint || '模型凭据已热切换');
+      keyInput.value = '';
+      api.get('/api/settings').then(res2 => {
+        keyStatus.textContent = res2.modelKeyConfigured ? `已配置（${res2.modelKeyMasked}）` : '未配置';
+        keyStatus.className = `badge ${res2.modelKeyConfigured ? 'badge-ok' : 'badge-warn'}`;
+      }).catch(() => {});
+    });
+
     render(box,
       ui.pageTitle('账户', '你的云操作系统身份'),
       infoBox,
+      ui.sectionCard('模型凭据（DeepSeek API Key）',
+        ui.toolbar(ui.badge('状态：', 'muted'), keyStatus),
+        h('p', { class: 'muted small', style: 'margin:4px 0 8px', text: '配置后内容流水线即刻走 LLM 撰写（热切换，无需重启）。Key 服务端 0600 存储，页面只显示掩码。' }),
+        ui.toolbar(ui.grow(ui.field('API Key', keyInput)), ui.actions(keyBtn))),
       h('div', { class: 'two-col' },
         ui.sectionCard('修改昵称',
           h('div', { class: 'form-grid form-grid-1' }, ui.field('昵称 displayName', displayNameInput)),
