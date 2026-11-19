@@ -4,7 +4,7 @@
 
 **让每个创意都有收入。** 基于 DeepSeek Harness（DSH）最新版构建：创意从这里进入（选题/想法），经 AI 团队变成作品（内容/技能），在市场与客户那里变成收入（订单/RaaS 计费）——一条**创意 → 作品 → 收入**的完整漏斗。
 
-需求与架构见 docs/（PRD / ARD / 开发文档）。
+需求与架构见 docs/（PRD / ARD / 开发文档）；用户指南见 docs/user-guide.md，变更历史见 CHANGELOG.md。
 
 ## 主轴：创意变现漏斗
 
@@ -59,4 +59,4 @@ PORT=3000 HOST=127.0.0.1 node dist/opcos-console/src/server.js   # systemd 见 d
 - packages/dsh-adapter — DSH/Cordis 唯一接触面（升级隔离层 + compat 门禁 + TelemetryBus）
 - packages/dsh-plugins/* — 10 个插件：billing / memory / blackboard / skill-forge / team / marketplace / content / console / lifecycle / geo-monitor
 - packages/opcos-bundle — 可安装 Bundle（cordis.patch.yml + 启动健康握手 + 全链路 Demo）
-- packages/opcos-console — 创意变现控制台（14 面板：漏斗总览/我的创意/创意市场/协作团队/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）；多用户注册登录（scrypt 密码 + HttpOnly 会话），每个创意者独立云操作系统，团队创意成员共享协作
+- packages/opcos-console — 创意变现控制台（15 面板：漏斗总览/我的创意/创意市场/协作团队/团队/任务板/黑板/Skill 市场/订单/创作者中心/客户账单/RaaS 计费/内容引擎/创意资产）；多用户注册登录（scrypt 密码 + HttpOnly 会话），每个创意者独立云操作系统，团队创意成员共享协作
