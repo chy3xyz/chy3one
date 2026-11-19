@@ -61,4 +61,21 @@ export interface PublishResult {
   url: string
   publishedAt: number
   success: boolean
+  /**
+   * CO-04 内容表现回流（可选，Mock 口径）：发布即回传首波模拟表现指标，
+   * 供内容面板与创意记忆体 analytics 流沉淀（真实平台接入后为真实数据）。
+   */
+  metrics?: ContentMetrics
+}
+
+/** 单篇内容表现指标（CO-04；数值均为模拟口径，真实平台接入后替换） */
+export interface ContentMetrics {
+  /** 阅读/播放量 */
+  views: number
+  /** 点赞/喜欢 */
+  likes: number
+  /** 分享/转发 */
+  shares: number
+  /** 互动率 0..1（互动数/阅读数） */
+  engagement: number
 }

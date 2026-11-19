@@ -296,11 +296,16 @@ export class MockWechatAdapter implements PublishAdapter {
   readonly platform = 'wechat'
 
   async publish(content: PlatformContent): Promise<PublishResult> {
+    // CO-04 模拟表现回流（Mock 口径）：首波阅读/点赞/分享随发布回执返回
+    const views = 1000 + (content.title.length % 9) * 150
+    const likes = Math.round(views * 0.09)
+    const shares = Math.round(likes * 0.25)
     return {
       platform: this.platform,
       url: `https://mp.weixin.qq.com/s/${randomUUID()}`,
       publishedAt: Date.now(),
       success: true,
+      metrics: { views, likes, shares, engagement: views > 0 ? Math.round(((likes + shares) / views) * 100) / 100 : 0 },
     }
   }
 }

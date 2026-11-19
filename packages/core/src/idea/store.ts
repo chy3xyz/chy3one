@@ -239,13 +239,22 @@ export class SqliteIdeaStore {
     `)
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_stage ON ideas (stage, created_at DESC)')
     // 多用户迁移（增量列：老库直接 ALTER，列已存在则忽略）
-    for (const column of ['owner_id', 'team_id', 'archived']) {
+    for (const column of ['owner_id', 'team_id']) {
       try {
         this.db.exec(`ALTER TABLE ideas ADD COLUMN ${column} TEXT`)
       } catch {
         /* 列已存在（重复打开同一库） */
       }
     }
+    // archived 单独建 INTEGER 列（类型亲和保证 0/1 数字存储；TEXT 列会导致
+    // "0.0" 字符串使 SQL 过滤 archived=0 永假——2026-11-19 实测教训）
+    try {
+      this.db.exec('ALTER TABLE ideas ADD COLUMN archived INTEGER')
+    } catch {
+      /* 列已存在（重复打开同一库） */
+    }
+    // 存量归一：老库 TEXT 形态的 0/1 归一为整数（NULL=未归档保持不变）
+    this.db.exec("UPDATE ideas SET archived = CAST(archived AS INTEGER) WHERE archived IS NOT NULL")
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_ideas_owner ON ideas (owner_id, created_at DESC)')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS idea_versions (
@@ -336,7 +345,7 @@ export class SqliteIdeaStore {
   /** 归档/恢复：归档项从默认列表与市场隐藏，数据保留可恢复 */
   setArchived(id: string, archived: boolean): Idea {
     const current = this.require(id)
-    this.db.prepare('UPDATE ideas SET archived = ?, updated_at = ? WHERE id = ?').run(archived ? 1 : 0, this.now(), id)
+    this.db.prepare('UPDATE ideas SET archived = CAST(? AS INTEGER), updated_at = ? WHERE id = ?').run(archived ? 1 : 0, this.now(), id)
     const updated: Idea = { ...current, archived }
     this.mirrorMeta(updated)
     return updated

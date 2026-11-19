@@ -101,6 +101,34 @@ const L = ledger.body.ledger.assets
 const final = await req('GET', `api/ideas/${idea.id}`)
 ok('终态核对', L.finance.total === 129000 && L.tokens.distributed === 260000 && final.body.idea.stage === 'asset')
 
+// ── 第二阶段：完善能力断言（全局检索/归档/表现回流/记忆隔离） ──
+const gsearch = await req('GET', `api/search?q=${encodeURIComponent('三源合恰')}`)
+ok('全局检索命中创意', gsearch.status === 200 && gsearch.body.ideas.some(i => i.id === idea.id))
+
+const arc = await req('POST', `api/ideas/${idea.id}/archive`, { archived: true })
+const listAfterArc = await req('GET', 'api/ideas')
+ok('归档后列表隐藏', arc.status === 200 && arc.body.idea.archived === true && !listAfterArc.body.ideas.some(i => i.id === idea.id))
+const restore = await req('POST', `api/ideas/${idea.id}/archive`, { archived: false })
+const listAfterRestore = await req('GET', 'api/ideas')
+ok('恢复后列表重现', restore.status === 200 && listAfterRestore.body.ideas.some(i => i.id === idea.id))
+
+// CO-04 表现回流：analytics 流应有 content-metrics 正本（发布阶段产生）
+const metricsEntries = await req('GET', `api/ideas/${idea.id}/entries?stream=analytics`)
+ok('CO-04 表现指标写入 analytics 流', metricsEntries.status === 200 && metricsEntries.body.entries.some(e => e.content.includes('content-metrics')))
+
+// 记忆 owner 隔离：demo 写一条独有记忆 → 新注册用户不应看到
+await req('POST', 'api/memory', { scope: 'global', category: 'soul', content: 'DEMO专属记忆标记 ABCQW', confidence: 0.9 })
+await req('POST', 'api/auth/logout', {})
+const probeName = `probe-${Date.now()}`
+await req('POST', 'api/auth/register', { username: probeName, password: 'probe123' })
+const probeWrite = await req('POST', 'api/memory', { scope: 'global', category: 'soul', content: 'PROBE独有记忆标记 XYZQW', confidence: 0.9 })
+const others = await req('GET', 'api/memory?category=soul')
+ok('记忆 owner 隔离：新用户看不到他人 soul 条目',
+  probeWrite.status === 200
+  && others.body.entries.some(e => e.content.includes('XYZQW'))
+  && !others.body.entries.some(e => e.content.includes('ABCQW')))
+await req('POST', 'api/auth/login', { username: USER, password: PASS })
+
 const funnel = await req('GET', 'api/funnel')
 console.log(`\n═══ E2E 完成：${pass}/${step} 步通过 ═══`)
 console.log(`创意 ${idea.id} 终态：阶段=${final.body.idea.stage} · 财务 ¥${(L.finance.total/100).toFixed(2)} · Token ${L.tokens.distributed}`)

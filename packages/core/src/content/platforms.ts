@@ -1,6 +1,21 @@
 import { randomUUID } from 'node:crypto'
-import type { PlatformContent, PublishResult } from './types.js'
+import type { ContentMetrics, PlatformContent, PublishResult } from './types.js'
 import type { PublishAdapter } from './strategy.js'
+
+/** CO-04 模拟表现指标：按平台基数生成首波数据（真实平台 API 接入后替换） */
+function mockMetrics(platform: string, seed: string): ContentMetrics {
+  const base = { wechat: 1200, xiaohongshu: 800, douyin: 2600, twitter: 500, bilibili: 900 }[platform] ?? 600
+  const jitter = (seed.charCodeAt(seed.length - 1) % 40) / 100 + 0.8 // 0.8~1.2
+  const views = Math.round(base * jitter)
+  const likes = Math.round(views * 0.08)
+  const shares = Math.round(likes * 0.3)
+  return {
+    views,
+    likes,
+    shares,
+    engagement: views > 0 ? Math.round(((likes + shares) / views) * 100) / 100 : 0,
+  }
+}
 
 /**
  * 多平台分发（prd2.md 4.2 CO-03：公众号/小红书/抖音/Twitter/B站，适配 <30s/平台）。
@@ -80,6 +95,7 @@ export class MockPlatformAdapter implements PublishAdapter {
       url: `${shape.urlBase}${randomUUID()}`,
       publishedAt: Date.now(),
       success: true,
+      metrics: mockMetrics(this.platform, content.title + this.platform),
     }
   }
 }

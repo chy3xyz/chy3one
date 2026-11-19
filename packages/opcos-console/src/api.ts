@@ -1265,6 +1265,36 @@ async function dispatchApi(
         )
         dispatch = await new MultiPlatformDispatcher(adapters).dispatch(result.content)
       }
+      // CO-04 表现回流：首波 metrics 聚合写入创意记忆体 analytics 流 + 账本互动率
+      if (ideaId !== undefined && setup.memoryHub) {
+        const allMetrics = [
+          result.publish.metrics,
+          ...((dispatch as { dispatches?: Array<{ result: { metrics?: { views: number; likes: number; shares: number; engagement: number } } }> })?.dispatches ?? [])
+            .map((d) => d.result.metrics),
+        ].filter((m): m is NonNullable<typeof m> => !!m)
+        if (allMetrics.length > 0) {
+          const views = allMetrics.reduce((sum, m) => sum + m.views, 0)
+          const engaged = allMetrics.reduce((sum, m) => sum + m.views * m.engagement, 0)
+          const engagement = views > 0 ? Math.round((engaged / views) * 100) / 100 : 0
+          setup.memoryHub.write(ideaId, 'analytics', {
+            content: JSON.stringify({
+              kind: 'content-metrics',
+              title: result.brief.title,
+              platforms: allMetrics.length,
+              views,
+              likes: allMetrics.reduce((sum, m) => sum + m.likes, 0),
+              shares: allMetrics.reduce((sum, m) => sum + m.shares, 0),
+              engagement,
+            }),
+            confidence: 0.8,
+            authority: 'model',
+          })
+          const home = setup.ideaStore?.homeDir(ideaId)
+          if (home) {
+            IdeaLedger.forIdeaHome(home, ideaId).updateAnalytics({ content_engagement: engagement })
+          }
+        }
+      }
       sendJson(req, res, 200, { ...result, dispatch })
       return
     }
