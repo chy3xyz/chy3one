@@ -10,7 +10,7 @@
  * 响应（含 res.headersSent 防护），调用方无需再兜底 catch。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
@@ -837,6 +837,35 @@ function requireLifecycle(setup: ConsoleSetup): IdeaLifecycle {
  * run(ideaId) 时选题/人设/沉淀全部落到该创意的记忆体；插件缺席（隔离）或
  * 创意不存在时静默回退全局人设记忆，run 本身不失败。
  */
+// ─────────────── 模型凭据设置（设置面板；消除 SSH 配 key 门槛） ───────────────
+// 存储为 <dataDir>/model-key.json（0600），UI 只回传掩码不回传完整 key
+
+function modelKeyFileOf(setup: ConsoleSetup): string {
+  // installedDir = <dataDir>/installed → 父目录即 dataDir
+  return join(dirname(setup.installedDir), 'model-key.json')
+}
+
+function readModelKey(setup: ConsoleSetup): string {
+  const file = modelKeyFileOf(setup)
+  if (!existsSync(file)) return ''
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).apiKey ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writeModelKey(setup: ConsoleSetup, key: string): void {
+  const file = modelKeyFileOf(setup)
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+  writeFileSync(file, JSON.stringify({ apiKey: key }, null, 2) + '\n', { mode: 0o600 })
+}
+
+function maskKey(key: string): string {
+  if (!key) return ''
+  return key.length <= 8 ? '****' : key.slice(0, 4) + '****' + key.slice(-4)
+}
+
 function wireIdeaMemory(setup: ConsoleSetup, content: ContentService): void {
   if (!setup.ideaStore || !setup.memoryHub) return
   if (typeof content.setIdeaMemoryResolver !== 'function') return
@@ -1094,6 +1123,8 @@ const API_PATHS = new Set([
   '/api/content/stats',
   '/api/content/events',
   '/api/content/history',
+  '/api/settings',
+  '/api/settings/model-key',
   '/api/skills',
   '/api/skills/install',
   '/api/skills/publish-draft',
@@ -1310,6 +1341,39 @@ async function dispatchApi(
     case 'GET /api/content/stats': {
       const content = requireService<ContentService>(setup, 'opc.content')
       sendJson(req, res, 200, { ...content.stats(), mode: content.mode() })
+      return
+    }
+
+    case 'GET /api/settings': {
+      // 设置面板读端：模型凭据只回传掩码，不回传完整 key
+      const key = readModelKey(setup)
+      sendJson(req, res, 200, {
+        modelKeyConfigured: key.length > 0,
+        modelKeyMasked: maskKey(key),
+        hint: key.length > 0 ? '模型凭据已配置，内容流水线走 LLM 撰写' : '未配置——内容流水线走模板策略（可用但产出为模板拼接）',
+      })
+      return
+    }
+
+    case 'POST /api/settings/model-key': {
+      // 设置模型凭据：写入服务端文件（0600）+ 热切换（无需重启）
+      const owner = requireUser(user)
+      const body = await readJsonObject(req)
+      const key = requireString(body, 'apiKey')
+      const content = setup.getService('opc.content') as ContentService & { setApiKey?: (key: string) => void } | undefined
+      if (!content) throw new OpcError('SERVICE_UNAVAILABLE', 'opc.content service is not available')
+      if (typeof content.setApiKey !== 'function') {
+        throw new OpcError('SERVICE_UNAVAILABLE', 'opc.content does not support runtime key switching (old build)')
+      }
+      writeModelKey(setup, key)
+      content.setApiKey(key)
+      // 凭据写入决策留痕（不含 key 本体）
+      sendJson(req, res, 200, {
+        ok: true,
+        masked: maskKey(key),
+        hint: '模型凭据已热切换：内容流水线即刻走 LLM 撰写（无需重启）',
+        setBy: owner.username,
+      })
       return
     }
 

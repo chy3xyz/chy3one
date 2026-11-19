@@ -65,6 +65,8 @@ export interface ContentService {
   setStrategies(overrides: StrategySet): void
   /** 每创意人设记忆解析器注入口（CO-02；可选——旧宿主/测试可不调用） */
   setIdeaMemoryResolver?(resolver: (ideaId: string) => MemoryStore | undefined): void
+  /** 运行时切换模型凭据（设置面板用；可选） */
+  setApiKey?(key: string): void
   /** CO-05 爆款模板沉淀出口注入口（可选；控制台层写入创意记忆体 facts 流） */
   setTemplateSink?(sink: (ideaId: string, template: { kind: 'content-template'; title: string; angle: string; score: number; content: string; at: number }) => void): void
   /** 发布历史正本（runsFile JSONL 倒序；可选——未配置 runsFile 时返回空） */
@@ -99,16 +101,23 @@ export function apply(ctx: OpcContext, config: Config) {
   const apiKey = resolveApiKey(config)
   const templateTopic = new TemplateTopicStrategy(topicSource)
   const templateWrite = new TemplateWriteStrategy()
+  // LLM 策略可运行时热切换（设置面板配 key 无需重启）：key 有效用 LLM，否则回退模板
   let topicStrategy: TopicStrategy = templateTopic
   let writeStrategy: WriteStrategy = templateWrite
-  if (apiKey.length > 0) {
-    const client = new DeepSeekChatClient(apiKey, {
+  const applyLlmStrategies = (key: string) => {
+    if (key.length === 0) {
+      writeStrategy = templateWrite
+      topicStrategy = templateTopic
+      return
+    }
+    const client = new DeepSeekChatClient(key, {
       baseUrl: config.deepseekBaseUrl,
       model: config.deepseekModel,
     })
     writeStrategy = new DeepSeekWriteStrategy(client, templateWrite)
     topicStrategy = new DeepSeekAnalysisStrategy(client, templateTopic)
   }
+  applyLlmStrategies(apiKey)
 
   const pipeline = new ContentPipeline({
     memory,
@@ -130,6 +139,10 @@ export function apply(ctx: OpcContext, config: Config) {
     },
     setIdeaMemoryResolver(resolver) {
       pipeline.setIdeaMemoryResolver(resolver)
+    },
+    /** 运行时切换模型凭据（设置面板配 key 无需重启）；空串回退模板策略 */
+    setApiKey(key: string) {
+      applyLlmStrategies(key)
     },
     /** CO-05 爆款模板沉淀出口接线（可选；控制台层注入创意记忆体 facts 流写入器） */
     setTemplateSink(sink) {
@@ -157,7 +170,7 @@ export function apply(ctx: OpcContext, config: Config) {
     },
     memory,
     stats: () => ({ runs }),
-    mode: () => ({ llm: apiKey.length > 0, hotSearch: topicSource !== undefined }),
+    mode: () => ({ llm: writeStrategy !== templateWrite, hotSearch: topicSource !== undefined }),
   }
 
   ctx.provideService('opc.content', service)
