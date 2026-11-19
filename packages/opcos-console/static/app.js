@@ -2071,17 +2071,20 @@
           ui.toolbar(pwdBtn, signOutAllBtn))));
   };
 
-  /* ===== 登录页（未登录时接管主区，不启动面板路由） ===== */
+  /* ===== 登录页（未登录时整页接管：隐藏侧栏与主区网格，登录后恢复） ===== */
   function renderLogin() {
-    document.querySelector('.sidenav')?.classList.add('hidden');
-    const box = $('#main');
+    document.body.classList.add('login-mode');
+    document.querySelector('.layout')?.classList.add('hidden');
+    const box = document.createElement('div');
+    box.className = 'login-wrap';
+    document.body.append(box);
     let mode = 'login';
     const usernameInput = h('input', { class: 'input', autocomplete: 'username', placeholder: '2-32 位字母/数字/下划线' });
     const passwordInput = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '至少 6 位' });
     const displayInput = h('input', { class: 'input', placeholder: '昵称（可选）' });
     const displayField = ui.field('昵称 displayName', displayInput);
     displayField.classList.add('hidden');
-    const submit = h('button', { class: 'btn btn-primary', type: 'submit', text: '登录' });
+    const submit = h('button', { class: 'btn btn-primary', type: 'submit', style: 'width:100%;padding:10px 0', text: '登录' });
     const toggle = h('a', { href: 'javascript:void(0)', text: '还没有账号？注册一个 →' });
     toggle.addEventListener('click', () => {
       mode = mode === 'login' ? 'register' : 'login';
@@ -2111,14 +2114,16 @@
         submit.textContent = original;
       }
     } },
-      h('h2', { class: 'page-title', text: '登录 CreativeOS' }),
-      h('p', { class: 'muted', text: '每个创意者都有自己的云操作系统——创意、记忆与收入都在你的账号里。' }),
+      h('div', { class: 'login-brand' },
+        h('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' }, h('path', { d: 'M9 1 3 9h4l-1 6 6-8H8z' })),
+        h('h2', { class: 'login-title', text: 'CreativeOS' })),
+      h('p', { class: 'muted login-sub', text: '每个创意者都有自己的云操作系统——创意、记忆与收入都在你的账号里。' }),
       ui.field('用户名 username', usernameInput),
       ui.field('密码 password', passwordInput),
       displayField,
-      h('div', { class: 'toolbar-actions' }, submit),
-      h('p', { class: 'small', style: 'margin:10px 0 0' }, toggle));
-    render(box, h('div', { class: 'login-wrap' }, form));
+      submit,
+      h('p', { class: 'small', style: 'margin:16px 0 0;text-align:center' }, toggle));
+    box.append(form);
   }
 
   async function initAuth() {
@@ -2142,6 +2147,9 @@
     } else {
       badge.textContent = '未登录';
       badge.classList.remove('hidden');
+      logoutBtn.classList.remove('hidden');
+      logoutBtn.textContent = '去登录';
+      logoutBtn.addEventListener('click', () => location.reload());
       renderLogin();
     }
   }
