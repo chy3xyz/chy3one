@@ -452,6 +452,8 @@ export interface ConsoleDeps {
   signingKeys?: Ed25519KeyPair
   /** 多用户身份层（可选：缺省时保持 v1 单用户无鉴权行为） */
   auth?: AuthStores
+  /** 漏斗时序采集器（可选：趋势端点依赖；缺省时趋势返回空） */
+  funnelSnapshots?: { snapshot(d: Record<string, number>): unknown; trendByDay(days: number, now?: number): unknown[]; shouldSnapshot(now: number): boolean }
 }
 
 /** 多用户身份三件套（users/sessions/teams 同批构造） */
@@ -491,6 +493,8 @@ export interface ConsoleSetup {
   readonly signingKeys?: Ed25519KeyPair
   /** 多用户身份层（缺省 undefined：单用户无鉴权模式） */
   readonly auth?: AuthStores
+  /** 漏斗时序采集器（缺省 undefined：趋势返回空） */
+  readonly funnelSnapshots?: { snapshot(d: Record<string, number>): unknown; trendByDay(days: number, now?: number): unknown[]; shouldSnapshot(now: number): boolean }
 }
 
 /**
@@ -529,6 +533,7 @@ export function createApiSetup(deps: ConsoleDeps): ConsoleSetup {
     signingKeys: deps.signingKeys,
     subscriptions: deps.subscriptions,
     auth: deps.auth,
+    funnelSnapshots: deps.funnelSnapshots,
   }
 }
 
@@ -2025,9 +2030,8 @@ async function dispatchApi(
       const orders = setup.getService('opc.marketplace.orders') as OrderEngine | undefined
       const billing = setup.getService('opc.billing') as BillingEngine | undefined
       const revenueLedger = setup.getService('opc.marketplace.revenue') as RevenueLedger | undefined
-      sendJson(req, res, 200, {
-        // 段1 创意：登录态按用户可见性口径（我的+团队的+存量无主，与 GET /api/ideas 同源），
-        // 实体库缺席降级 topic 记忆计数
+      // 组装漏斗读数（快照与 trend 端点共用同一计算）
+      const funnelData = {
         ideas: setup.ideaStore
           ? user
             ? setup.ideaStore.listForUser(user.id, userTeamIds(setup, user)).length
@@ -2035,23 +2039,43 @@ async function dispatchApi(
           : memory
             ? memory.query({ category: 'topic', limit: 1000 }).length
             : 0,
-        // 段2 作品：流水线运行次数 + 已发布篇数（contentEvents 环形缓冲中 content_publish 计数）
         contents: {
           runs: content ? content.stats().runs : 0,
           published: setup.contentEvents.filter((event) => event.type === 'content_publish').length,
         },
-        // 段3 Skill：本能蒸馏草案数 / 市场在售数
         skills: {
           drafts: forge ? forge.listDrafts().length : 0,
           listed: setup.skillsIndex.count(),
         },
-        // 段4 收入：订单净额（paid+delivered，与 /api/bills/summary 共用 orderNetAggregates 口径）+ RaaS 计费收入
         revenue: {
           orderNetCount: orders ? orders.stats().netRevenue : 0,
           orderNetCents: orders ? orderNetAggregates(orders, revenueLedger).totalCents : 0,
           raasRevenueYuan: billing ? billing.totalRevenue() : 0,
         },
-      })
+      }
+      // 时序快照（节流 60 分钟一条；趋势图数据源）
+      if (setup.funnelSnapshots?.shouldSnapshot(Date.now())) {
+        try {
+          setup.funnelSnapshots.snapshot({
+            ideas: funnelData.ideas,
+            contentsRuns: funnelData.contents.runs,
+            contentsPublished: funnelData.contents.published,
+            skillsDrafts: funnelData.skills.drafts,
+            skillsListed: funnelData.skills.listed,
+            orderNetCents: funnelData.revenue.orderNetCents,
+            raasRevenueYuan: funnelData.revenue.raasRevenueYuan,
+          })
+        } catch { /* 快照失败不影响漏斗响应 */ }
+      }
+      sendJson(req, res, 200, funnelData)
+      return
+    }
+
+    case 'GET /api/funnel/trend': {
+      // 漏斗趋势（按日聚合快照；趋势图数据源）
+      const days = parseLimit(url.searchParams.get('days'), 14, 90)
+      const series = setup.funnelSnapshots?.trendByDay(days) ?? []
+      sendJson(req, res, 200, { series })
       return
     }
 

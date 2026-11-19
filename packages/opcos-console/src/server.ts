@@ -36,6 +36,7 @@ import {
   LoginLockout,
 } from '../../core/src/index.js'
 import { runAutoRenewalPass } from './auto-renew.js'
+import { FunnelSnapshotStore } from './funnel-snapshots.js'
 import {
   loadWithHandshake,
   type CordisFiberHandle,
@@ -167,6 +168,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     marketRoot: join(dataDir, 'ideas-market'),
   })
   const subscriptions = new SubscriptionStore(join(dataDir, 'subscriptions.db'))
+  const funnelSnapshots = new FunnelSnapshotStore(join(dataDir, 'funnel-snapshots.jsonl'))
 
   // SM-04 订阅自动续费（每日 pass）：到期且 auto_renew 开启 → 按市场价下单并支付
   //（Mock 通道语义）顺延权益；单条失败不阻断，异常只记日志
@@ -231,6 +233,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     signingKeys,
     subscriptions,
     auth,
+    funnelSnapshots,
   }
   const setup = createApiSetup(deps)
 
@@ -264,6 +267,7 @@ export async function startConsole(opts: ConsoleOptions = {}): Promise<RunningCo
     bodyIndex.close()
     ideaMarket.close()
     subscriptions.close()
+    funnelSnapshots.close()
     auth?.users.close()
     auth?.sessions.close()
     auth?.teams.close()

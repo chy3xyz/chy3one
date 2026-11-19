@@ -336,6 +336,19 @@
           : '系统状态：组件清单为空';
       } catch { healthLine.textContent = '系统状态：不可用'; }
     };
+    const trendBox = h('div');
+    const loadTrend = () => loadInto(trendBox, null, async () => {
+      const res = await api.get('/api/funnel/trend?days=14');
+      const series = (res && res.series) || [];
+      if (!series.length) return ui.empty('趋势图需要至少两天的快照数据——保持控制台运行，每日自动累积');
+      return barChart(series.map(s => ({
+        label: s.day.slice(5),
+        value: s.ideas,
+        sub: `创意 ${s.ideas} · 发布 ${s.contentsPublished} · 在售 ${s.skillsListed} · 净额 ${money(s.orderNetCents)}`,
+        show: String(s.ideas),
+      })));
+    }, '趋势加载失败');
+
     const loadTelemetry = () => loadInto(telemetryBox, null, async () => {
       const o = (await api.get('/api/overview')) || {};
       return timeline((o.telemetry && o.telemetry.recent) || []);
@@ -406,6 +419,7 @@
         h('p', { class: 'muted small', style: 'margin:10px 0 0',
           text: '创意直写选题记忆驱动内容流水线；作品沉淀的本能蒸馏为 Skill 上架，订单分成与 RaaS 计费构成双通道收入，全程沉淀记忆资产反哺创意。' })),
       ui.sectionCard('最近创意', recentBox),
+      ui.sectionCard('漏斗趋势（每日快照）', trendBox),
       healthLine,
       h('details', { class: 'collapse' },
         h('summary', { text: '最近埋点事件（系统埋点时间线）' }),
@@ -416,6 +430,7 @@
       loadRecent(),
       loadHealth(),
       loadTelemetry(),
+      loadTrend(),
     ]);
   };
 
