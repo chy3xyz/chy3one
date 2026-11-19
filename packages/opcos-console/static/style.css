@@ -850,3 +850,10 @@ body.login-mode .login-wrap { min-height: calc(100vh - var(--topbar-h)); }
   border-radius: 50%; animation: opc-spin 0.8s linear infinite; vertical-align: -2px;
 }
 @keyframes opc-spin { to { transform: rotate(360deg); } }
+
+/* 侧栏通知未读徽标 */
+.nav-dot {
+  margin-left: auto; padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 600; line-height: 1.4;
+  background: #f59e0b; color: #1c1917;
+}

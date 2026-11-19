@@ -440,6 +440,7 @@
     const mountLine = h('p', { class: 'muted small', style: 'margin:8px 0 0', text: '' });
     let selectedId = null;
     let detailTab = 'domains'; // 二级 Tab 记忆：同面板内切换创意保持所在页签
+    const domainDirty = new Set(); // 有未保存修改的三域（页签切换前确认）
 
     const refreshMounted = async () => {
       try {
@@ -540,11 +541,25 @@
           const pointsInput = h('textarea', { class: 'input', rows: 2, placeholder: '要点，一行一个' });
           pointsInput.value = (domain.points || []).join('\n');
           const saveBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存这个域' });
+          // dirty 跟踪：有未保存修改时按钮持续高亮「保存更改 *」，页签切换前确认（防丢输入）
+          const markDirty = () => {
+            saveBtn.textContent = '保存更改 *';
+            saveBtn.classList.add('btn-dirty');
+            domainDirty.add(key);
+          };
+          const clearDirty = () => {
+            saveBtn.textContent = '保存这个域';
+            saveBtn.classList.remove('btn-dirty');
+            domainDirty.delete(key);
+          };
+          summaryInput.addEventListener('input', markDirty);
+          pointsInput.addEventListener('input', markDirty);
           busyBtn(saveBtn, '保存中…', async () => {
             const points = pointsInput.value.split('\n').map(s => s.trim()).filter(Boolean);
             await api.request('PATCH', `/api/ideas/${idea.id}/domains`, {
               domain: key, summary: summaryInput.value.trim(), points,
             });
+            clearDirty();
             toast.ok(`「${idea.name}」的${DOMAIN_LABELS[key]}已更新`);
             await Promise.all([openDetail(), loadList()]);
           });
@@ -796,8 +811,11 @@
 
         // 发布到创意市场（ID-05/IM-01/IM-03）+ 协同入口
         const relationsBox = h('div');
+        let relationsCount = null;
         const collabListBox = h('div');
+        let relationsCountLocal = null;
         const renderRelations = (rels, collaborators) => {
+          relationsCount = rels.length;
           render(relationsBox, rels && rels.length
             ? ui.table(['类型', '关联创意', '强度', '说明'], rels.map(r => [
                 ui.badge(r.type === 'complementary' ? '互补' : '相似', r.type === 'complementary' ? 'ok' : 'info'),
@@ -920,15 +938,34 @@
                   h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
                   h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)),
             ui.sectionCard('工作区（MVP 开发文件）', wsBox)));
+        // 页签：三域有未保存修改时，切换前经内联确认（防丢输入）
         const tabBar = h('div', { class: 'tabs', id: 'idea-detail-tabs' },
-          DETAIL_TABS.map(([key, label]) => h('button', {
-            class: `tab${key === detailTab ? ' active' : ''}`, type: 'button', 'data-tab': key,
-            onclick: () => {
+          DETAIL_TABS.map(([key, label]) => {
+            const isCurrent = key === detailTab;
+            const badge = key === 'assets' && ldg ? ` ¥${((ldg.ledger.assets.finance.total) / 100).toFixed(0)}`
+              : key === 'market' && relationsCount !== null ? ` ${relationsCount} 关联` : '';
+            const btn = h('button', {
+              class: `tab${isCurrent ? ' active' : ''}`, type: 'button', 'data-tab': key,
+            }, h('span', { text: label + badge }));
+            if (!isCurrent && key === IDEA_STAGES[(IDEA_STAGES.indexOf(idea.stage) + 1) % IDEA_STAGES.length]) {
+              // nothing special here; stage advance handled by stepper
+            }
+            btn.addEventListener('click', () => {
+              if (domainDirty.size > 0) {
+                openInlineForm('tab-switch-dirty', '有未保存的三域修改', '输入任意内容以确认切换（将丢弃未保存修改）', () => {
+                  domainDirty.clear();
+                  detailTab = key;
+                  document.querySelectorAll('#idea-detail-body [data-tab]').forEach(el => el.classList.toggle('hidden', el.dataset.tab !== key));
+                  document.querySelectorAll('#idea-detail-tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
+                }, () => {}, { noInput: true, confirmText: '丢弃并切换', danger: '未保存的修改将丢失' });
+                return;
+              }
               detailTab = key;
-              $$('#idea-detail-body [data-tab]').forEach(el => el.classList.toggle('hidden', el.dataset.tab !== key));
-              $$('#idea-detail-tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
-            },
-          }, h('span', { text: label }))));
+              document.querySelectorAll('#idea-detail-body [data-tab]').forEach(el => el.classList.toggle('hidden', el.dataset.tab !== key));
+              document.querySelectorAll('#idea-detail-tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
+            });
+            return btn;
+          }));
 
         return h('div', { class: 'card section-card' },
           h('div', { class: 'memory-head' },
@@ -2257,6 +2294,33 @@
       renderLogin();
     }
   }
+
+  /** 侧栏通知未读徽标：与 localStorage 记录的已读数对比 */
+  async function updateMarketBadge() {
+    if (!currentUser) return;
+    try {
+      const res = await api.get(`/api/notifications?follower=${currentUser.username}`);
+      const count = ((res && res.notifications) || []).length;
+      const seen = Number(localStorage.getItem('opcos-notif-seen') || 0);
+      const link = document.querySelector('#sidenav a[data-route="market"]');
+      if (!link) return;
+      let dot = link.querySelector('.nav-dot');
+      if (count > seen) {
+        if (!dot) { dot = document.createElement('span'); dot.className = 'nav-dot'; link.append(dot); }
+        dot.textContent = String(count - seen);
+      } else if (dot) dot.remove();
+    } catch { /* 静默 */ }
+  }
+  // 打开市场面板时标记已读
+  const _origMarket = ROUTES.market;
+  ROUTES.market = async box => {
+    await _origMarket(box);
+    try {
+      const res = await api.get(`/api/notifications?follower=${(currentUser && currentUser.username) || 'console-user'}`);
+      localStorage.setItem('opcos-notif-seen', String(((res && res.notifications) || []).length));
+      updateMarketBadge();
+    } catch { /* 静默 */ }
+  };
 
   initHealth();
   initAuth();
