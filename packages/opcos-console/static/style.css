@@ -1415,6 +1415,12 @@ body.cmode .funnel-num { font-size: 34px; }
 /* 创意详情页顶部返回区 */
 .idea-detail-toolbar { margin-bottom: 14px; }
 
+/* 三域编辑器：三等分宽栏（card-grid 的 200px 最小宽会把引导问题挤成竖堆） */
+.domain-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; align-items: start; }
+.domain-grid .memory-card { min-width: 0; }
+.domain-grid .memory-card ul { padding-left: 18px; margin: 6px 0 10px; }
+.domain-grid .memory-card li { margin-bottom: 4px; line-height: 1.55; }
+
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 
 @media (max-width: 1280px) {
@@ -1472,6 +1478,7 @@ body.cmode .funnel-num { font-size: 34px; }
   .two-col .section-card { margin-bottom: 14px; }
   .three-col { grid-template-columns: 1fr; }
   .three-col .section-card { margin-bottom: 14px; }
+  .domain-grid { grid-template-columns: 1fr; }
   .funnel { flex-direction: column; }
   .funnel-arrow { align-self: center; transform: rotate(90deg); }
   .footer { padding: 10px 14px; }

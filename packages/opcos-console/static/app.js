@@ -880,9 +880,9 @@
 
         const domainCards = DOMAIN_KEYS.map(key => {
           const domain = domains[key] || { summary: '', points: [] };
-          const summaryInput = h('textarea', { class: 'input', rows: 3, placeholder: '这个域讲什么？（引导问题在上方）' });
+          const summaryInput = h('textarea', { class: 'input', rows: 4, placeholder: '这个域讲什么？（引导问题在上方）' });
           summaryInput.value = domain.summary || '';
-          const pointsInput = h('textarea', { class: 'input', rows: 2, placeholder: '要点，一行一个' });
+          const pointsInput = h('textarea', { class: 'input', rows: 3, placeholder: '要点，一行一个' });
           pointsInput.value = (domain.points || []).join('\n');
           const saveBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存这个域' });
           // dirty 跟踪：有未保存修改时按钮持续高亮「保存更改 *」，页签切换前确认（防丢输入）
@@ -999,15 +999,40 @@
 
         // 记忆体：最近条目 + 检索 + 写入
         const entriesBox = h('div');
+        /** 机器记忆人类可读化：决策 JSON（如阶段推进）翻译成一句话，其余原文展示 */
+        const humanizeEntry = content => {
+          if (typeof content !== 'string' || !content.startsWith('{')) return { kind: 'text', text: content };
+          try {
+            const j = JSON.parse(content);
+            if (j.kind === 'stage-transition') {
+              return {
+                kind: 'transition',
+                from: IDEA_STAGE_LABELS[j.from] || j.from || '—',
+                to: IDEA_STAGE_LABELS[j.to] || j.to || '—',
+                note: j.note || '',
+              };
+            }
+            return { kind: 'json', text: safeJson(j) };
+          } catch { return { kind: 'text', text: content }; }
+        };
         const renderEntries = entries => render(entriesBox, entries.length
-          ? h('ul', { class: 'timeline' }, entries.map(e => h('li', { class: 'timeline-item' },
-              h('div', { class: 'tl-head' },
-                ui.badge(`${STREAM_LABELS[e.stream] || e.stream} · ${e.authority === 'model' ? '模型总结' : '用户钦定'}`, 'info'),
-                h('span', { class: 'tl-time', text: fmtTime(e.createdAt) })),
-              h('p', { class: 'memory-content', text: e.content }))))
+          ? h('ul', { class: 'timeline' }, entries.map(e => {
+              const human = humanizeEntry(e.content);
+              return h('li', { class: 'timeline-item' },
+                h('div', { class: 'tl-head' },
+                  ui.badge(`${STREAM_LABELS[e.stream] || e.stream} · ${e.authority === 'model' ? '模型总结' : '用户钦定'}`, 'info'),
+                  h('span', { class: 'tl-time', text: fmtTime(e.createdAt) })),
+                human.kind === 'transition'
+                  ? h('p', { class: 'memory-content' },
+                      ui.badge(`阶段推进 ${human.from} → ${human.to}`, 'lime'),
+                      human.note ? h('span', { text: ` ${human.note}` }) : null)
+                  : human.kind === 'json'
+                    ? h('pre', { class: 'tl-payload', text: human.text })
+                    : h('p', { class: 'memory-content', text: e.content }));
+            }))
           : ui.empty('这条记忆流还是空的——检索、写入或编辑三域都会留痕'));
         renderEntries(d.entries || []);
-        const qInput = h('input', { class: 'input', placeholder: '在「我的创意」记忆体里全文检索（≥3 字任意子串）' });
+        const qInput = h('input', { class: 'input', placeholder: '全文检索（≥3 字任意子串）' });
         const searchBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '检索' });
         const search = () => loadInto(entriesBox, '检索中…', async () => {
           const params = new URLSearchParams();
@@ -1255,7 +1280,7 @@
 
         const detailBody = h('div', { id: 'idea-detail-body' },
           h('div', { 'data-tab': 'domains' },
-            h('div', { class: 'card-grid' }, domainCards),
+            h('div', { class: 'domain-grid' }, domainCards),
             ui.sectionCard('三域版本链（ID-04）',
               h('p', { class: 'muted small', style: 'margin:0 0 6px', text: '三域每次迭代自动入链；回滚会把当前三域先存为新版本，可随时再撤销。' }),
               versionsBox)),
@@ -1300,14 +1325,14 @@
                 ui.toolbar(writeBtn),
                 d.home ? h('details', { class: 'collapse' },
                   h('summary', { text: '记忆体目录（$DSH_HOME/ideas）' }),
-                  h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null)),
-            ui.sectionCard('工作区（MVP 开发文件）', wsBox)));
+                  h('pre', { class: 'tl-payload', text: safeJson(d.home) })) : null))));
         // 页签：三域有未保存修改时，切换前经内联确认（防丢输入）
         const tabBar = h('div', { class: 'tabs', id: 'idea-detail-tabs' },
           DETAIL_TABS.map(([key, label]) => {
             const isCurrent = key === detailTab;
             const badge = key === 'assets' && ldg ? ` ¥${((ldg.ledger.assets.finance.total) / 100).toFixed(0)}`
-              : key === 'market' && relationsCount !== null ? ` ${relationsCount} 关联` : '';
+              : key === 'market' && relationsCount !== null ? ` ${relationsCount} 关联`
+              : key === 'memory' ? ` ${(d.entries || []).length} 条记忆` : '';
             const btn = h('button', {
               class: `tab${isCurrent ? ' active' : ''}`, type: 'button', 'data-tab': key,
             }, h('span', { text: label + badge }));
