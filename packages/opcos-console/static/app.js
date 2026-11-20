@@ -139,7 +139,13 @@
     badge: (text, variant = 'muted') => h('span', { class: `badge badge-${variant}`, text }),
     // role="status"：装载中/空态对读屏器播报（aria-live 隐式 polite）
     empty: text => h('div', { class: 'empty', role: 'status', text }),
-    loading: text => h('div', { class: 'muted pad', role: 'status', text: text || '加载中…' }),
+    loading: text => {
+      // 骨架屏（shimmer）：视觉上占位比文案更接近成品布局；读屏器保留文字播报
+      const box = h('div', { class: 'skel', role: 'status', 'aria-label': text || '加载中…' },
+        h('i'), h('i'), h('i'), h('i'));
+      box.append(h('span', { class: 'hidden', text: text || '加载中…' }));
+      return box;
+    },
     field: (labelText, control) => h('label', { class: 'field' },
       h('span', { class: 'field-label', text: labelText }), control),
     table: (headers, rows) => {
@@ -180,12 +186,10 @@
       finally { btn.disabled = false; btn.textContent = original; }
     });
   }
-  /** 面板数据装载：loading → 内容 / 失败空态 */
+  /** 面板数据装载：骨架屏 → 内容 / 失败空态 */
   async function loadInto(box, loadingText, fn, errText) {
     box.innerHTML = '';
-    const loading = ui.loading(loadingText);
-    loading.prepend(Object.assign(document.createElement('span'), { className: 'spinner' }));
-    box.append(loading);
+    box.append(ui.loading(loadingText));
     try {
       render(box, await fn());
     } catch {
@@ -324,6 +328,25 @@
   const drKv = pairs => h('div', { class: 'dr-kv' },
     pairs.filter(Boolean).map(([k, v]) => [h('div', { class: 'k', text: k }), h('div', { class: 'v' }, v)])
       .flat());
+
+  /** 订单详情抽屉（订单交易 / 客户账单两处共用） */
+  const openOrderDrawer = order => {
+    if (!order) return;
+    drawer.open({
+      kind: '订单详情',
+      title: order.id,
+      body: h('div', {},
+        drKv([
+          ['订单 ID', order.id], ['Skill', order.skillId || '—'], ['版本', order.version || '—'],
+          ['买家', order.buyerId || '—'], ['金额', order.amount != null ? money(order.amount) : '—'],
+          ['状态', order.status || '—'], ['创建时间', order.createdAt ? fmtTime(order.createdAt) : '—'],
+        ]),
+        h('div', { class: 'dr-note' },
+          isUnpaid(order.status) ? '待支付：点击行内「支付」完成扣款与分成；' : '',
+          '订单净额口径：paid + delivered（pending / refunded / cancelled 不计入）。')),
+      foot: [h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() })],
+    });
+  };
 
   /* 命令面板（⌘K）：页面导航 + 跨创意/记忆/Skill 检索，↑↓ 选择、Enter 确认、Esc 关闭 */
   const palette = {
@@ -547,6 +570,10 @@
 
     /** 漏斗数字原位刷新（不重绘整面板，保留创意输入框状态） */
     const setNum = (node, v) => { node.textContent = v === null || v === undefined ? '—' : String(v); };
+    // 海报 KPI 与漏斗步骤各持一份节点（同一 DOM 节点不能挂两处）
+    const ideasKpiNum = h('span', { text: '—' }), publishedKpiNum = h('span', { text: '—' }),
+      listedKpiNum = h('span', { text: '—' }), revenueKpiNum = h('span', { text: '—' }),
+      raasKpiNote = h('span', { text: '' });
     const refreshFunnel = async () => {
       const f = (await api.get('/api/funnel')) || {};
       const contents = f.contents || {}, skills = f.skills || {}, revenue = f.revenue || {};
@@ -557,6 +584,14 @@
       setNum(listedNum, skills.listed);
       setNum(orderRevenueNum, money(revenue.orderNetCents));
       setNum(raasRevenueNum, yuan(revenue.raasRevenueYuan));
+      // 海报 KPI 行（创意 / 作品 / 在售 / 双通道收入）
+      setNum(ideasKpiNum, f.ideas);
+      setNum(publishedKpiNum, contents.published);
+      setNum(listedKpiNum, skills.listed);
+      const orderCents = Number(revenue.orderNetCents) || 0;
+      const raasCents = Math.round((Number(revenue.raasRevenueYuan) || 0) * 100);
+      setNum(revenueKpiNum, money(orderCents + raasCents));
+      raasKpiNote.textContent = `含 RaaS 计费 ${yuan(revenue.raasRevenueYuan)}`;
     };
     const loadRecent = () => loadInto(recentBox, null, async () => {
       const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
@@ -630,9 +665,25 @@
     const arrow = () => h('div', { class: 'funnel-arrow', 'aria-hidden': 'true', text: '→' });
     const numLine = (node, unit) => h('div', { class: 'funnel-num-line' }, node,
       h('span', { class: 'funnel-unit', text: unit }));
+    // 海报英雄区（藏蓝反白）：一眼看到四格关键数字，漏斗卡片承载操作
+    const kpi = (label, valueNodes, subNode) => {
+      const box = h('div', { class: 'kpi' },
+        h('div', { class: 'l', text: label }), h('div', { class: 'v' }, valueNodes));
+      if (subNode) box.append(h('div', { class: 'd' }, subNode));
+      return box;
+    };
+    const poster = h('section', { class: 'poster inverse' },
+      h('div', { class: 'poster-eyebrow', text: 'OPC-OS · Creative Monetization OS' }),
+      h('h1', { text: '创意变现' }),
+      h('p', { class: 'poster-lede', text: '今天，你的创意走到哪一步了？记下创意、发出作品、上架技能、到手收入——全程沉淀记忆资产反哺创意。' }),
+      h('div', { class: 'kpis' },
+        kpi('记下的创意', [ideasKpiNum, h('small', { text: ' 条' })]),
+        kpi('已发布作品', [publishedKpiNum, h('small', { text: ' 篇' })]),
+        kpi('在售技能', [listedKpiNum, h('small', { text: ' 个' })]),
+        kpi('双通道收入', [revenueKpiNum], raasKpiNote)));
 
     render(box,
-      ui.pageTitle('创意变现', '今天，你的创意走到哪一步了？'),
+      poster,
       ui.sectionCard(null,
         h('div', { class: 'funnel' },
           stage('① 记下的创意 · 自动生成三域草案',
@@ -1287,8 +1338,15 @@
       rankBox = h('div'),
       notifBox = h('div');
 
-    const renderList = ideas => render(listBox, ideas.length
-      ? h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
+    // 返回节点而非直接渲染：loadInto 统一落位（fn 内自行渲染会被其后的 render(box, undefined) 清空）
+    const renderList = ideas => ideas.length
+      ? h('div', { class: 'card-grid' }, ideas.map(idea => h('div', {
+          class: 'card memory-card clickable-card',
+          onclick: ev => {
+            if (ev.target.closest('button,a')) return; // 关注/去详情按钮不触发抽屉
+            palette.openIdeaDrawer(idea.ideaId, idea.name);
+          },
+        },
           h('div', { class: 'memory-head' },
             h('strong', { text: idea.name }),
             ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
@@ -1305,7 +1363,7 @@
               },
             }),
             h('a', { class: 'btn btn-sm', href: '#/ideas', text: '去详情' })))))
-      : ui.empty('还没有发布到市场的创意——在「我的创意」详情里点「发布到市场」'));
+      : ui.empty('还没有发布到市场的创意——在「我的创意」详情里点「发布到市场」');
 
     const search = () => loadInto(listBox, '检索中…', async () => {
       const params = new URLSearchParams();
@@ -1314,8 +1372,8 @@
       if (stageSelect.value) params.set('stage', stageSelect.value);
       params.set('limit', '50');
       const res = await api.get(`/api/market/ideas?${params.toString()}`);
-      renderList(res.ideas || []);
       listTitle.textContent = q || stageSelect.value ? `全网创意（命中 ${res.ideas.length}）` : '全网创意';
+      return renderList(res.ideas || []);
     }, '创意市场检索失败');
     searchBtn.addEventListener('click', search);
     onEnter(searchInput, search);
@@ -1844,22 +1902,7 @@
         tr.classList.add('clickable');
         tr.addEventListener('click', ev => {
           if (ev.target.closest('button')) return;
-          const o = orders[i];
-          if (!o) return;
-          drawer.open({
-            kind: '订单详情',
-            title: o.id,
-            body: h('div', {},
-              drKv([
-                ['订单 ID', o.id], ['Skill', o.skillId || '—'], ['版本', o.version || '—'],
-                ['买家', o.buyerId || '—'], ['金额', o.amount != null ? money(o.amount) : '—'],
-                ['状态', o.status || '—'], ['创建时间', o.createdAt ? fmtTime(o.createdAt) : '—'],
-              ]),
-              h('div', { class: 'dr-note' },
-                isUnpaid(o.status) ? '待支付：点击行内「支付」完成扣款与分成；' : '',
-                '订单净额口径：paid + delivered（pending / refunded / cancelled 不计入）。')),
-            foot: [h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() })],
-          });
+          openOrderDrawer(orders[i]);
         });
       });
       return table;
@@ -2033,17 +2076,23 @@
       const data = await api.get(`/api/bills?buyerId=${encodeURIComponent(buyerId)}`);
       const orders = (data && data.orders) || [];
       if (!orders.length) return ui.empty(`买家 ${data && data.buyerId} 暂无订单`);
-      return [
+      const resultLine = [
         h('p', { class: 'result-line' },
           `买家 ${data.buyerId} · 共 ${orders.length} 笔订单 · 总消费 `,
           h('strong', { class: 'ok-text', text: money(data.totalSpent) })),
         h('p', { class: 'muted small', style: 'margin:4px 0 10px', text: '总消费口径：paid + delivered 订单金额合计（pending / refunded / cancelled 不计入），单位：分' }),
-        ui.table(['订单 ID', 'Skill', '版本', '金额', '状态', '下单时间'],
-          orders.map(o => [
-            h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.version || '—',
-            money(o.amount), statusBadge(o.status), fmtTime(o.createdAt),
-          ])),
       ];
+      const table = ui.table(['订单 ID', 'Skill', '版本', '金额', '状态', '下单时间'],
+        orders.map(o => [
+          h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.version || '—',
+          money(o.amount), statusBadge(o.status), fmtTime(o.createdAt),
+        ]));
+      // 行点击 → 订单详情抽屉（与订单交易共用）
+      $$('tbody tr', table).forEach((tr, i) => {
+        tr.classList.add('clickable');
+        tr.addEventListener('click', () => openOrderDrawer(orders[i]));
+      });
+      return [...resultLine, table];
     }, '账单加载失败');
     buyerSelect.addEventListener('change', () => {
       if (buyerSelect.value) { buyerInput.value = buyerSelect.value; loadBills(); }

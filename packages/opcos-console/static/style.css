@@ -758,6 +758,10 @@ textarea.input { resize: vertical; min-height: 64px; font-family: var(--mono); f
 
 .memory-card { padding: 16px 18px; }
 
+/* 可点击卡片（市场创意卡 → 抽屉预览） */
+.clickable-card { cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
+.clickable-card:hover { border-color: rgba(0, 0, 0, 0.3); transform: translateY(-1px); }
+
 .memory-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .memory-content { margin: 10px 0 8px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
@@ -1324,6 +1328,86 @@ body.cmode .funnel-num { font-size: 34px; }
   flex: none;
 }
 
+/* ================= 海报英雄区（藏蓝反白 · KPI 左分隔线，借鉴原型 .poster） ================= */
+
+.poster {
+  border-radius: var(--r-lg);
+  padding: 26px 28px;
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 20px;
+  animation: rise 0.28s var(--ease);
+}
+
+.poster.inverse { background: var(--opc-navy); color: #fff; }
+.poster.inverse .poster-lede { color: rgba(255, 255, 255, 0.62); }
+.poster.inverse .poster-eyebrow { color: rgba(255, 255, 255, 0.55); }
+
+.poster-eyebrow {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--opc-faint);
+}
+
+.poster h1 {
+  font-size: 34px;
+  font-weight: 340;
+  line-height: 1.05;
+  letter-spacing: -1.1px;
+  margin: 12px 0 0;
+}
+
+.poster-lede { font-size: 13.5px; margin: 10px 0 0; max-width: 74ch; color: var(--opc-muted); }
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.kpi { padding-left: 22px; border-left: 1px solid rgba(255, 255, 255, 0.18); min-width: 0; }
+.kpi:first-child { padding-left: 0; border-left: none; }
+.kpi .l {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+.kpi .v {
+  font-size: 30px;
+  font-weight: 300;
+  line-height: 1.05;
+  letter-spacing: -0.9px;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+.kpi .v small { font-size: 14px; font-weight: 400; letter-spacing: 0; }
+.kpi .d { font-size: 11.5px; margin-top: 6px; color: rgba(255, 255, 255, 0.6); font-variant-numeric: tabular-nums; }
+
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ================= 骨架屏（shimmer 骨架条，借鉴原型 .skel） ================= */
+
+.skel { padding: 20px; display: grid; gap: 12px; }
+.skel i {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--opc-border-soft) 25%, #fafaf8 37%, var(--opc-border-soft) 63%);
+  background-size: 400% 100%;
+  animation: sk-shimmer 1.4s infinite;
+}
+.skel i:nth-child(2) { width: 72%; }
+.skel i:nth-child(3) { width: 48%; }
+.skel i:nth-child(4) { width: 86%; }
+@keyframes sk-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 
 @media (max-width: 1280px) {
@@ -1368,6 +1452,11 @@ body.cmode .funnel-num { font-size: 34px; }
 
   .main { padding: 16px 14px 32px; }
   .stat-value { font-size: 22px; }
+  .poster { padding: 20px 18px; }
+  .poster h1 { font-size: 26px; }
+  .kpis { grid-template-columns: 1fr 1fr; gap: 14px 0; }
+  .kpi:nth-child(3) { padding-left: 0; border-left: none; }
+  .kpi .v { font-size: 24px; }
   .toolbar { flex-direction: column; align-items: stretch; }
   .toolbar-actions { justify-content: flex-end; }
   .split-row { flex-direction: column; gap: 12px; }
