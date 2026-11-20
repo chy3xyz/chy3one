@@ -249,6 +249,231 @@
     return form;
   }
 
+  /* ===== 布局交互层：双视角菜单 / 面包屑 / 命令面板 / 右侧抽屉（借鉴运营后台原型） ===== */
+
+  // 路由 → { title, group, mode }：mode 决定面板归属哪个视角的菜单（creator 创作 / ops 运营 / both 共有）
+  const PANEL_META = {
+    overview:   { title: '总览', group: '工作台', mode: 'both' },
+    ideas:      { title: '我的创意', group: '工作台', mode: 'creator' },
+    content:    { title: '内容引擎', group: '工作台', mode: 'creator' },
+    memory:     { title: '创意资产', group: '工作台', mode: 'creator' },
+    team:       { title: 'AI 组队', group: '协作', mode: 'creator' },
+    board:      { title: '任务板', group: '协作', mode: 'creator' },
+    teams:      { title: '协作团队', group: '协作', mode: 'ops' },
+    blackboard: { title: '黑板', group: '协作', mode: 'ops' },
+    market:     { title: '创意市场', group: '增长', mode: 'both' },
+    skills:     { title: 'Skill 市场', group: '增长', mode: 'both' },
+    creators:   { title: '我的收入', group: '经营', mode: 'creator' },
+    orders:     { title: '订单交易', group: '经营', mode: 'ops' },
+    bills:      { title: '客户账单', group: '经营', mode: 'ops' },
+    billing:    { title: 'RaaS 计费', group: '经营', mode: 'ops' },
+    account:    { title: '账户', group: '系统', mode: 'both' },
+  };
+  const MODE_LABELS = { creator: '创作者', ops: '运营后台' };
+
+  /** 视角切换：换菜单集 + 创作视角放宽密度档（原型 body.cmode），localStorage 记忆 */
+  const appMode = {
+    current: localStorage.getItem('opcos-mode') === 'ops' ? 'ops' : 'creator',
+    _apply(mode) {
+      document.body.classList.toggle('mode-creator', mode === 'creator');
+      document.body.classList.toggle('mode-ops', mode === 'ops');
+      document.body.classList.toggle('cmode', mode === 'creator');
+      $$('.modeselect button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+    },
+    set(mode) {
+      if (!MODE_LABELS[mode] || mode === appMode.current) { appMode._apply(mode); return; }
+      appMode.current = mode;
+      localStorage.setItem('opcos-mode', mode);
+      appMode._apply(mode);
+      // 当前面板不属于新视角 → 回该视角共用的工作台总览
+      const meta = PANEL_META[router.current()];
+      if (meta && meta.mode !== 'both' && meta.mode !== mode) location.hash = '#/overview';
+    },
+    /** 面板渲染前调用：深链直入其他视角的面板时菜单自动跟随，并更新面包屑 */
+    applyToPanel(name) {
+      const meta = PANEL_META[name];
+      if (!meta) return;
+      if (meta.mode !== 'both' && meta.mode !== appMode.current) {
+        appMode.current = meta.mode;
+        localStorage.setItem('opcos-mode', meta.mode);
+        appMode._apply(meta.mode);
+      }
+      const g = $('#crumb-g'), t = $('#crumb-t');
+      if (g) g.textContent = meta.group;
+      if (t) t.textContent = meta.title;
+    },
+  };
+
+  /* 右侧抽屉：快速详情（scrim 点击 / Esc 关闭；面板与抽屉共用遮罩） */
+  const drawer = {
+    open({ kind, title, body, foot }) {
+      $('#drawer-kind').textContent = kind || '—';
+      $('#drawer-title').textContent = title || '—';
+      render($('#drawer-body'), body || ui.empty('没有内容'));
+      render($('#drawer-foot'), foot || []);
+      $('#drawer').classList.add('on');
+      $('#scrim').classList.add('on');
+    },
+    close() {
+      $('#drawer').classList.remove('on');
+      if (!palette.isOpen()) $('#scrim').classList.remove('on');
+    },
+  };
+
+  /* 抽屉键值行（mono 大写键） */
+  const drKv = pairs => h('div', { class: 'dr-kv' },
+    pairs.filter(Boolean).map(([k, v]) => [h('div', { class: 'k', text: k }), h('div', { class: 'v' }, v)])
+      .flat());
+
+  /* 命令面板（⌘K）：页面导航 + 跨创意/记忆/Skill 检索，↑↓ 选择、Enter 确认、Esc 关闭 */
+  const palette = {
+    idx: 0,
+    items: [],
+    isOpen: () => $('#palette').classList.contains('on'),
+    open() {
+      $('#palette').classList.add('on');
+      const input = $('#palette-input');
+      input.value = '';
+      palette.idx = 0;
+      palette.render('');
+      setTimeout(() => input.focus(), 20);
+    },
+    close() {
+      $('#palette').classList.remove('on');
+      if (!$('#drawer').classList.contains('on')) $('#scrim').classList.remove('on');
+    },
+    /** 结果 = 视角页面（本地） + 创意/记忆/Skill（/api/search 实时），kind 列标注来源 */
+    render(q, apiData) {
+      const kw = q.trim().toLowerCase();
+      const pages = Object.entries(PANEL_META)
+        .filter(([name, meta]) => !kw || name.includes(kw) || meta.title.toLowerCase().includes(kw))
+        .map(([name, meta]) => ({
+          kind: MODE_LABELS[meta.mode] || meta.mode,
+          label: meta.title,
+          hint: meta.group,
+          go: () => { location.hash = `#/${name}`; },
+        }));
+      const apiItems = [];
+      const d = apiData || {};
+      for (const i of d.ideas || []) apiItems.push({
+        kind: '创意',
+        label: `${i.name || i.id}（${IDEA_STAGE_LABELS[i.stage] || i.stage || '创意'}）`,
+        hint: i.id.slice(0, 12),
+        go: () => palette.openIdeaDrawer(i.id, i.name),
+      });
+      for (const m of d.memories || []) apiItems.push({
+        kind: '记忆',
+        label: (m.content || '').slice(0, 60),
+        hint: m.category || '',
+        go: () => drawer.open({
+          kind: `记忆 · ${m.category || 'memory'}`,
+          title: (m.content || '').slice(0, 40) || '记忆条目',
+          body: h('div', {},
+            h('div', { class: 'dr-note' }, m.content || '—'),
+            drKv([['记录时间', fmtTime(m.createdAt)], ['置信度', m.confidence != null ? String(m.confidence) : null]])),
+        }),
+      });
+      for (const k of d.skills || []) apiItems.push({
+        kind: 'Skill',
+        label: `${k.name} · v${k.version || '?'}`,
+        hint: k.price != null ? money(k.price) : '',
+        go: () => { location.hash = '#/skills'; },
+      });
+      palette.items = [...pages, ...apiItems];
+      if (palette.idx >= palette.items.length) palette.idx = Math.max(0, palette.items.length - 1);
+      const groups = [];
+      let lastKind = null;
+      palette.items.forEach((item, i) => {
+        if (item.kind !== lastKind) {
+          groups.push(h('div', { class: 'search-group-title', text: item.kind }));
+          lastKind = item.kind;
+        }
+        groups.push(h('div', {
+          class: 'r' + (i === palette.idx ? ' on' : ''),
+          onclick: () => { palette.close(); item.go(); },
+        }, h('span', { class: 't', text: item.label }), h('span', { class: 'k', text: item.hint })));
+      });
+      render($('#palette-res'), groups.length ? groups
+        : h('div', { class: 'empty', style: 'padding:24px' },
+          h('b', { text: '没有匹配结果' }),
+          h('p', { text: '试试页面名或创意 / 记忆 / Skill 关键词。' })));
+    },
+    move(delta) {
+      if (!palette.items.length) return;
+      palette.idx = Math.min(Math.max(palette.idx + delta, 0), palette.items.length - 1);
+      const q = $('#palette-input').value;
+      palette.render(q, palette.lastApi);
+    },
+    /** 创意抽屉预览：三域摘要 + 元信息 + 前往完整详情 */
+    async openIdeaDrawer(id, name) {
+      drawer.open({ kind: '创意预览', title: name || id, body: ui.loading('加载创意三域…') });
+      try {
+        const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
+        const idea = ideas.find(x => x.id === id);
+        if (!idea) { drawer.open({ kind: '创意预览', title: name || id, body: ui.empty('创意不存在或已归档') }); return; }
+        const dom = (idea.domains) || {};
+        const domainsView = h('div', {},
+          ...DOMAIN_KEYS.map(key => {
+            const d = dom[key] || {};
+            return h('div', { class: 'dr-sec' },
+              h('h4', { text: `${DOMAIN_LABELS[key]} · ${key}` }),
+              h('p', { class: 'muted', style: 'margin:0;font-size:13px;line-height:1.6', text: d.summary || '（待完善）' }));
+          }),
+          drKv([['当前阶段', IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—'], ['创建时间', fmtTime(idea.createdAt)]]));
+        drawer.open({
+          kind: '创意预览',
+          title: idea.name || idea.id,
+          body: domainsView,
+          foot: [
+            h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '打开完整详情', onclick: () => { drawer.close(); location.hash = `#/ideas?id=${idea.id}`; } }),
+            h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() }),
+          ],
+        });
+      } catch {
+        drawer.open({ kind: '创意预览', title: name || id, body: ui.empty('加载失败——创意和收入数据不受影响，可重试') });
+      }
+    },
+  };
+
+  /** 命令面板绑定：按钮/⌘K/键盘导航/实时检索（替代旧全局搜索浮层） */
+  function initGlobalSearch() {
+    const openBtn = $('#search-open');
+    if (openBtn) openBtn.addEventListener('click', () => palette.open());
+    $$('.modeselect button').forEach(b => b.addEventListener('click', () => appMode.set(b.dataset.mode)));
+    $('#drawer-close')?.addEventListener('click', () => drawer.close());
+    $('#scrim')?.addEventListener('click', () => { drawer.close(); palette.close(); });
+    const input = $('#palette-input');
+    if (!input) return;
+    let debounce;
+    input.addEventListener('input', () => {
+      clearTimeout(debounce);
+      const q = input.value;
+      palette.idx = 0;
+      palette.render(q);
+      const kw = q.trim();
+      if (!kw) { palette.lastApi = null; return; }
+      debounce = setTimeout(async () => {
+        try {
+          palette.lastApi = await api.get(`/api/search?q=${encodeURIComponent(kw)}&limit=10`);
+          if (palette.isOpen() && $('#palette-input').value.trim() === kw) palette.render(kw, palette.lastApi);
+        } catch { /* 检索失败静默（401 已由 api 层处理） */ }
+      }, 250);
+    });
+    document.addEventListener('keydown', ev => {
+      const meta = ev.metaKey || ev.ctrlKey;
+      if (meta && ev.key.toLowerCase() === 'k') { ev.preventDefault(); palette.isOpen() ? palette.close() : palette.open(); return; }
+      if (ev.key === 'Escape') { palette.close(); drawer.close(); return; }
+      if (!palette.isOpen()) return;
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); palette.move(1); }
+      if (ev.key === 'ArrowUp') { ev.preventDefault(); palette.move(-1); }
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        const item = palette.items[palette.idx];
+        if (item) { palette.close(); item.go(); }
+      }
+    });
+  }
+
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
   const ROUTE_NAMES = ['overview', 'ideas', 'market', 'teams', 'account', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
@@ -266,6 +491,7 @@
       // overview 的 fetch 在飞行中用户点击导航，旧结果晚到覆盖新面板）
       router._chain = router._chain.then(async () => {
         const name = router.current();
+        appMode.applyToPanel(name);
         $$('#sidenav a').forEach(a => a.classList.toggle('active', a.dataset.route === name));
         const box = $('#main');
         box.innerHTML = '';
@@ -1605,15 +1831,38 @@
       }
       const data = await api.get(`/api/orders?buyerId=${encodeURIComponent(buyerId)}`);
       const orders = ((data || {}).orders) || [];
-      return orders.length
-        ? ui.table(['订单 ID', 'Skill', '买家', '金额', '状态', '创建时间', '操作'],
-            orders.map(o => [
-              h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.buyerId || '—',
-              o.amount != null ? money(o.amount) : '—', statusBadge(o.status),
-              o.createdAt ? fmtTime(o.createdAt) : '—',
-              isUnpaid(o.status) ? payButton(o) : '—',
-            ]))
-        : ui.empty('还没有订单——把货架链接发给潜在买家');
+      if (!orders.length) return ui.empty('还没有订单——把货架链接发给潜在买家');
+      const table = ui.table(['订单 ID', 'Skill', '买家', '金额', '状态', '创建时间', '操作'],
+        orders.map(o => [
+          h('code', { class: 'key-code', text: o.id }), o.skillId || '—', o.buyerId || '—',
+          o.amount != null ? money(o.amount) : '—', statusBadge(o.status),
+          o.createdAt ? fmtTime(o.createdAt) : '—',
+          isUnpaid(o.status) ? payButton(o) : '—',
+        ]));
+      // 行点击 → 订单详情抽屉（操作列按钮不触发）
+      $$('tbody tr', table).forEach((tr, i) => {
+        tr.classList.add('clickable');
+        tr.addEventListener('click', ev => {
+          if (ev.target.closest('button')) return;
+          const o = orders[i];
+          if (!o) return;
+          drawer.open({
+            kind: '订单详情',
+            title: o.id,
+            body: h('div', {},
+              drKv([
+                ['订单 ID', o.id], ['Skill', o.skillId || '—'], ['版本', o.version || '—'],
+                ['买家', o.buyerId || '—'], ['金额', o.amount != null ? money(o.amount) : '—'],
+                ['状态', o.status || '—'], ['创建时间', o.createdAt ? fmtTime(o.createdAt) : '—'],
+              ]),
+              h('div', { class: 'dr-note' },
+                isUnpaid(o.status) ? '待支付：点击行内「支付」完成扣款与分成；' : '',
+                '订单净额口径：paid + delivered（pending / refunded / cancelled 不计入）。')),
+            foot: [h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() })],
+          });
+        });
+      });
+      return table;
     }, '订单加载失败');
     busyBtn(orderBtn, '下单中…', async () => {
       const skillId = skillSelect.value;
@@ -2326,49 +2575,6 @@
     box.append(form);
   }
 
-  /** 全局搜索浮层（跨创意/记忆/Skill 三路聚合） */
-  function initGlobalSearch() {
-    const input = $('#global-search');
-    if (!input) return;
-    const pop = document.createElement('div');
-    pop.className = 'global-search-pop hidden';
-    document.body.append(pop);
-    const close = () => pop.classList.add('hidden');
-    document.addEventListener('click', (ev) => {
-      if (!pop.contains(ev.target) && ev.target !== input) close();
-    });
-    const renderPop = (data) => {
-      const groups = [];
-      if ((data.ideas || []).length) groups.push(
-        h('div', { class: 'search-group-title', text: '创意' }),
-        ...data.ideas.map(i => h('a', { class: 'sidenav', style: 'display:flex;padding:8px 12px;border-radius:8px', href: `#/ideas?id=${i.id}`, onclick: close },
-          h('span', { text: `${i.name || i.id}（${IDEA_STAGE_LABELS[i.stage] || i.stage || '创意'}）` }))));
-      if ((data.memories || []).length) groups.push(
-        h('div', { class: 'search-group-title', text: '记忆' }),
-        ...data.memories.map(m => h('div', { style: 'padding:6px 12px' },
-          h('div', { class: 'small', text: m.content.slice(0, 80) }),
-          h('div', { class: 'muted', style: 'font-size:10px', text: `${m.category} · ${fmtTime(m.createdAt)}` }))));
-      if ((data.skills || []).length) groups.push(
-        h('div', { class: 'search-group-title', text: 'Skill' }),
-        ...data.skills.map(k => h('a', { class: 'sidenav', style: 'display:flex;padding:8px 12px;border-radius:8px', href: '#/skills', onclick: close },
-          h('span', { text: `${k.name} · ${money(k.price)}` }))));
-      render(pop, groups.length ? h('div', { class: 'card section-card', style: 'padding:8px' }, groups)
-        : h('div', { class: 'card section-card', style: 'padding:12px' }, ui.empty('没有匹配的结果')));
-      pop.classList.remove('hidden');
-    };
-    let debounce;
-    input.addEventListener('input', () => {
-      clearTimeout(debounce);
-      const q = input.value.trim();
-      if (!q) { close(); return; }
-      debounce = setTimeout(async () => {
-        try {
-          renderPop(await api.get(`/api/search?q=${encodeURIComponent(q)}&limit=10`));
-        } catch { /* 检索失败静默（401 已由 api 层处理） */ }
-      }, 250);
-    });
-  }
-
   async function initAuth() {
     const badge = $('#user-badge');
     const logoutBtn = $('#logout-btn');
@@ -2390,6 +2596,7 @@
         location.reload();
       });
       initGlobalSearch();
+      appMode._apply(appMode.current);
       router.start();
     } else {
       badge.textContent = '未登录';

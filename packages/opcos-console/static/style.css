@@ -165,19 +165,6 @@ h1, h2, h3, h4 { margin: 0; font-weight: 540; letter-spacing: -0.2px; }
 
 .topbar-spacer { flex: 1; }
 
-.search-input {
-  max-width: 300px;
-  height: 32px;
-  border-radius: var(--pill);
-  background: var(--opc-bg-inset);
-  border-color: transparent;
-  font-size: 12.5px;
-  color: var(--opc-muted);
-  transition: border-color 0.14s;
-}
-
-.search-input:hover { border-color: var(--opc-border); color: #000; }
-
 /* ---------------- 侧栏（纯黑 inverse canvas） ---------------- */
 
 .sidenav {
@@ -433,6 +420,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 540; letter-spacing: -0.2px; }
 
 .tbl tbody tr:last-child td { border-bottom: none; }
 .tbl tbody tr:hover { background: var(--opc-row-hover); }
+.tbl tbody tr.clickable { cursor: pointer; }
 .tbl a { white-space: nowrap; }
 
 .key-code {
@@ -1084,6 +1072,258 @@ body.login-mode .login-wrap { min-height: 100vh; }
 .login-title { margin: 0; font-size: 26px; font-weight: 340; letter-spacing: -0.6px; }
 .login-sub { margin: 4px 0 18px; }
 
+/* ================= 布局交互层（借鉴原型：面包屑 / 视角切换 / ⌘K 命令面板 / 右侧抽屉） ================= */
+
+/* 面包屑 */
+.crumb { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 540; min-width: 0; }
+.crumb .slash { color: var(--opc-faint); font-family: var(--mono); font-size: 11px; }
+.crumb b { white-space: nowrap; }
+
+/* 视角切换（分段胶囊：创作者 / 运营后台） */
+.modeselect {
+  background: var(--opc-bg-inset);
+  border-radius: var(--pill);
+  padding: 3px;
+  display: inline-flex;
+  gap: 2px;
+  flex: none;
+}
+.modeselect button {
+  height: 28px;
+  padding: 0 13px;
+  border-radius: var(--pill);
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 480;
+  color: var(--opc-muted);
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+  white-space: nowrap;
+}
+.modeselect button:hover { color: #000; }
+.modeselect button.on { background: #000; color: #fff; }
+
+/* 搜索按钮（胶囊 + ⌘K 提示，点击弹命令面板） */
+.searchbtn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--pill);
+  background: var(--opc-bg-inset);
+  border: 1px solid transparent;
+  color: var(--opc-muted);
+  font: inherit;
+  font-size: 12.5px;
+  min-width: 220px;
+  cursor: pointer;
+  transition: border-color 0.14s, color 0.14s;
+  flex: none;
+}
+.searchbtn:hover { border-color: var(--opc-border); color: #000; }
+.searchbtn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.searchbtn kbd {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  border: 1px solid var(--opc-border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: #fff;
+  color: var(--opc-faint);
+}
+
+/* 圆形图标按钮（抽屉关闭等） */
+.iconbtn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--opc-bg-inset);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: #000;
+  font-size: 13px;
+  transition: background 0.14s;
+  flex: none;
+}
+.iconbtn:hover { background: #ececea; }
+
+/* ---------------- 双视角菜单显隐（创作 / 运营） ---------------- */
+
+body.mode-ops .sidenav a[data-mode="creator"] { display: none; }
+body.mode-creator .sidenav a[data-mode="ops"] { display: none; }
+
+/* 视角为空值的组标题照常显示；隐藏链接的 nav-group 前后留白不塌 */
+
+/* ---------------- 创作视角密度档（comfortable ×1.12，借鉴原型 body.cmode） ---------------- */
+
+body.cmode .page-title { font-size: 32px; letter-spacing: -1px; }
+body.cmode .page-desc { font-size: 14.5px; }
+body.cmode .card { padding: 22px 24px; }
+body.cmode .card-title { font-size: 17px; }
+body.cmode .stat-card { padding: 20px 22px; }
+body.cmode .stat-value { font-size: 34px; }
+body.cmode .tbl { font-size: 14px; }
+body.cmode .tbl th { font-size: 10.5px; padding: 14px 18px; }
+body.cmode .tbl td { padding: 15px 18px; }
+body.cmode .btn { height: 40px; font-size: 14px; padding: 0 18px; }
+body.cmode .btn-sm { height: 32px; font-size: 13px; padding: 0 13px; }
+body.cmode .chip { height: 32px; font-size: 13px; }
+body.cmode .sidenav a { height: 42px; font-size: 14.5px; }
+body.cmode .input { min-height: 40px; }
+body.cmode .big-number { font-size: 40px; }
+body.cmode .funnel-num { font-size: 34px; }
+
+/* ---------------- 右侧抽屉 ---------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 60;
+}
+.scrim.on { opacity: 1; pointer-events: auto; }
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 94vw);
+  background: #fff;
+  z-index: 61;
+  border-left: 1px solid var(--opc-border);
+  transform: translateX(101%);
+  transition: transform 0.22s var(--ease);
+  display: flex;
+  flex-direction: column;
+}
+.drawer.on { transform: none; }
+
+.dr-h {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--opc-border);
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.dr-heading { flex: 1; min-width: 0; }
+.dr-h h2 { font-size: 20px; font-weight: 540; letter-spacing: -0.3px; margin-top: 8px; line-height: 1.3; }
+
+.slabel {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--opc-faint);
+  font-weight: 400;
+}
+
+.dr-b { flex: 1; overflow: auto; padding: 6px 0 20px; }
+.dr-f {
+  padding: 14px 24px;
+  border-top: 1px solid var(--opc-border);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: #fff;
+}
+.dr-f:empty { display: none; }
+.dr-sec { padding: 16px 24px; border-top: 1px solid var(--opc-border-soft); }
+.dr-sec:first-child { border-top: none; }
+.dr-sec h4 {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--opc-faint);
+  font-weight: 400;
+  margin: 0 0 12px;
+}
+
+/* 抽屉键值行（mono 大写键 + 值） */
+.dr-kv { display: grid; grid-template-columns: 96px 1fr; gap: 10px 16px; font-size: 13px; padding: 18px 24px; }
+.dr-kv .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--opc-faint); padding-top: 3px; }
+.dr-kv .v { font-variant-numeric: tabular-nums; word-break: break-all; }
+
+/* 抽屉内引导块（奶油色块，借鉴原型 .impact） */
+.dr-note {
+  background: var(--opc-cream);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin: 0 24px 16px;
+}
+.dr-note b { font-weight: 540; }
+
+/* ---------------- 命令面板（⌘K） ---------------- */
+
+.palette {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 16vh;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s;
+}
+.palette.on { opacity: 1; pointer-events: auto; }
+.palette .box {
+  width: min(620px, 92vw);
+  background: #fff;
+  border-radius: var(--r-lg);
+  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  transform: translateY(-6px);
+  transition: transform 0.14s var(--ease);
+}
+.palette.on .box { transform: none; }
+.palette input {
+  width: 100%;
+  height: 54px;
+  border: none;
+  border-bottom: 1px solid var(--opc-border-soft);
+  padding: 0 20px;
+  font: inherit;
+  font-size: 15px;
+  background: none;
+  color: var(--opc-text);
+}
+.palette input:focus { outline: none; }
+.palette input::placeholder { color: var(--opc-placeholder); }
+.palette .res { max-height: 320px; overflow: auto; padding: 6px; }
+.palette .r {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  font-size: 13px;
+  cursor: pointer;
+}
+.palette .r.on { background: var(--opc-bg-inset); }
+.palette .r .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette .r .k {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--opc-faint);
+  flex: none;
+}
+
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 
 @media (max-width: 1280px) {
@@ -1118,8 +1358,13 @@ body.login-mode .login-wrap { min-height: 100vh; }
 
   .rail-foot { margin-top: 0; margin-left: auto; border-top: none; padding: 0 4px; }
 
-  .topbar { padding: 8px 14px; }
-  .search-input { max-width: none; flex: 1; }
+  .topbar { padding: 8px 14px; gap: 8px; }
+  .crumb .ep { display: none; }
+  .crumb .slash { display: none; }
+  .searchbtn { min-width: 0; flex: 1; }
+  .searchbtn span { display: none; }
+  .modeselect button { padding: 0 9px; font-size: 11px; }
+  #status-badge { display: none; }
 
   .main { padding: 16px 14px 32px; }
   .stat-value { font-size: 22px; }
