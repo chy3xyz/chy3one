@@ -30,9 +30,11 @@ test('three-domains: 超长摘要截断（草案上限 400）', () => {
   assert.ok(draft.problem.summary.length <= 401 + 1) // 400 + 省略号
 })
 
-test('deriveIdeaName: 前 16 字符截断', () => {
+test('deriveIdeaName: 前 32 字符截断（默认标题放宽，改名通道可再修正）', () => {
   assert.equal(deriveIdeaName('短的创意名'), '短的创意名')
-  const long = deriveIdeaName('这是一个特别特别特别长的创意描述需要被截断处理才行')
-  assert.equal(long.length, 17) // 16 + …
+  const long = deriveIdeaName('这是一个特别特别特别长的创意描述需要被截断处理才行因为原始描述实在太长了必须截断')
+  assert.equal(long.length, 33) // 32 + …
   assert.ok(long.endsWith('…'))
+  const exact32 = deriveIdeaName('一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二')
+  assert.equal(exact32, '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二') // 恰 32 字不截断
 })

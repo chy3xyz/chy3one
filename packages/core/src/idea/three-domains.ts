@@ -65,8 +65,8 @@ export function draftThreeDomains(text: string): ThreeDomains {
   }
 }
 
-/** 从描述文本派生默认创意名：去空白取前 16 字符（用户可随时改名） */
+/** 从描述文本派生默认创意名：去空白取前 32 字符（更完整的默认标题；仍可改名修正） */
 export function deriveIdeaName(text: string): string {
   const flattened = text.replace(/\s+/g, ' ').trim()
-  return flattened.length > 16 ? flattened.slice(0, 16) + '…' : flattened
+  return flattened.length > 32 ? flattened.slice(0, 32) + '…' : flattened
 }

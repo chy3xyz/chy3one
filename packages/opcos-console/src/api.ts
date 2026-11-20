@@ -2350,6 +2350,24 @@ async function dispatchApi(
           sendJson(req, res, 200, { idea: updated })
           return
         }
+        if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'name') {
+          if (method !== 'PATCH') {
+            throw new OpcError('METHOD_NOT_ALLOWED', `${method} /api/ideas/:id/name is not supported`)
+          }
+          const body = await readJsonObject(req)
+          const name = typeof body.name === 'string' ? body.name.trim() : ''
+          if (!name) throw new OpcError('VALIDATION_ERROR', 'name is required')
+          if (name.length > 64) throw new OpcError('VALIDATION_ERROR', 'name too long (max 64)')
+          const updated = store.rename(ideaId, name)
+          hub?.write(ideaId, 'decisions', {
+            // JSON 标记条目：改名审计记录（桥接层过滤，不进选题候选）
+            content: JSON.stringify({ kind: 'idea-rename', name }),
+            confidence: 0.8,
+            authority: 'user',
+          })
+          sendJson(req, res, 200, { idea: updated })
+          return
+        }
         if (segments.length === 2 && decodePathSegment(segments[1], 'sub') === 'entries') {
           if (method === 'GET') {
             const keyword = nonEmptyParam(url.searchParams.get('q'))

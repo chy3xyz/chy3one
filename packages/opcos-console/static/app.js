@@ -1374,8 +1374,24 @@
             h('a', { class: 'btn btn-sm', href: '#/ideas', text: '← 返回创意库' })),
           h('div', { class: 'card section-card' },
             h('div', { class: 'memory-head' },
-              h('h3', { class: 'card-title', text: idea.name }),
-              ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
+              h('h3', { class: 'card-title idea-title', title: idea.name, text: idea.name }),
+              h('div', { class: 'row-actions' },
+                h('button', {
+                  class: 'btn btn-sm', type: 'button', text: '改名', title: '创意名可随时修正（记录自动生成时可能被截断）',
+                  onclick: () => {
+                    openInlineForm(`rename-${idea.id}`, `修改创意名`, '', input =>
+                      api.request('PATCH', `/api/ideas/${idea.id}/name`, { name: input }), () => {
+                      toast.ok('创意名已更新');
+                      openDetail();
+                    }, { fieldLabel: '新名称', confirmText: '保存名称', anchor: document.querySelector('#main .card.section-card') });
+                    // 预填当前名（openInlineForm 无初值参数，渲染后回填）
+                    requestAnimationFrame(() => {
+                      const inp = document.querySelector('#inline-form input');
+                      if (inp) inp.value = idea.name || '';
+                    });
+                  },
+                }),
+                ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted'))),
             stepper,
             h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
             tabBar,
@@ -2557,84 +2573,121 @@
   };
 
   /* ===== 面板：账户（改昵称/改密/会话管理） ===== */
-  ROUTES.account = async box => {
-    if (!currentUser) {
-      render(box, ui.pageTitle('账户', '管理你的账号'), ui.empty('未启用多用户或未登录'));
-      return;
+  /* ===== 个人设置：三段式（账号 / 安全 / 模型凭据）——面板与左下角抽屉共用构建 ===== */
+  const SETTINGS_SECTIONS = [
+    ['profile', '账号'],
+    ['security', '安全'],
+    ['modelkey', '模型凭据'],
+  ];
+
+  /** 构建单个设置段（每次返回全新节点——面板与抽屉可能同时持有各自的实例） */
+  function buildSettingsSection(key) {
+    if (key === 'profile') {
+      const info = ui.sectionCard('账号信息',
+        h('div', { class: 'card-grid' },
+          ui.statCard('昵称', currentUser.displayName || '—'),
+          ui.statCard('用户名', currentUser.username),
+          ui.statCard('注册时间', fmtTime(currentUser.createdAt))));
+      const displayNameInput = h('input', { class: 'input', value: currentUser.displayName || '' });
+      const profileBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存昵称' });
+      busyBtn(profileBtn, '保存中…', async () => {
+        const res = await api.post('/api/auth/profile', { displayName: displayNameInput.value.trim() });
+        currentUser = res.user;
+        const badge = $('#user-badge');
+        if (badge) badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
+        const av = $('#user-av');
+        if (av) av.textContent = (currentUser.displayName || currentUser.username || 'O').trim().slice(0, 1).toUpperCase();
+        toast.ok('昵称已更新');
+      });
+      return [info,
+        ui.sectionCard('修改昵称',
+          h('div', { class: 'form-grid form-grid-1' }, ui.field('昵称 displayName', displayNameInput)),
+          ui.toolbar(profileBtn))];
     }
-    const infoBox = ui.sectionCard('账号信息',
-      h('div', { class: 'card-grid' },
-        ui.statCard('昵称', currentUser.displayName || '—'),
-        ui.statCard('用户名', currentUser.username),
-        ui.statCard('注册时间', fmtTime(currentUser.createdAt))));
-
-    const displayNameInput = h('input', { class: 'input', value: currentUser.displayName || '' });
-    const profileBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存昵称' });
-    busyBtn(profileBtn, '保存中…', async () => {
-      const res = await api.post('/api/auth/profile', { displayName: displayNameInput.value.trim() });
-      currentUser = res.user;
-      const badge = $('#user-badge');
-      if (badge) badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
-      toast.ok('昵称已更新');
-    });
-
-    const oldPwd = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '当前密码' });
-    const newPwd = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '新密码（至少 6 位）' });
-    const newPwd2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '再输入一遍新密码' });
-    const pwdBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '修改密码' });
-    busyBtn(pwdBtn, '提交中…', async () => {
-      if (newPwd.value !== newPwd2.value) return toast.err('两次输入的新密码不一致');
-      await api.post('/api/auth/password', { oldPassword: oldPwd.value, newPassword: newPwd.value });
-      toast.ok('密码已更新——为安全起见已全端下线，请用新密码重新登录');
-      setTimeout(() => location.reload(), 1200);
-    });
-
-    const signOutAllBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '全端下线' });
-    signOutAllBtn.addEventListener('click', () => {
-      // 改密是全端下线的唯一路径（会话 revoke 未暴露独立端点）——引导而非模拟确认
-      toast.info('改密即可全端下线：请使用下方「修改密码」完成该操作');
-    });
-
-    // 模型凭据设置（消除 SSH 配 key 门槛）
+    if (key === 'security') {
+      const oldPwd = h('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '当前密码' });
+      const newPwd = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '新密码（至少 6 位）' });
+      const newPwd2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '再输入一遍新密码' });
+      const pwdBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '修改密码' });
+      busyBtn(pwdBtn, '提交中…', async () => {
+        if (newPwd.value !== newPwd2.value) return toast.err('两次输入的新密码不一致');
+        await api.post('/api/auth/password', { oldPassword: oldPwd.value, newPassword: newPwd.value });
+        toast.ok('密码已更新——为安全起见已全端下线，请用新密码重新登录');
+        setTimeout(() => location.reload(), 1200);
+      });
+      return [ui.sectionCard('修改密码（改密后全端下线）',
+        h('div', { class: 'form-grid form-grid-1' },
+          ui.field('当前密码', oldPwd), ui.field('新密码', newPwd), ui.field('确认新密码', newPwd2)),
+        ui.toolbar(pwdBtn),
+        h('p', { class: 'muted small', style: 'margin:8px 0 0', text: '改密是全端下线的唯一路径：所有已登录设备（含本机）都会退出，需用新密码重新登录。' }))];
+    }
+    // 模型凭据
     const keyStatus = h('span', { class: 'badge badge-muted', text: '读取中…' });
-    const keyInput = h('input', { class: 'input', type: 'password', placeholder: '粘贴 DeepSeek API Key（sk-…）' });
-    const keyBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存并生效' });
-    const loadKeyStatus = () => loadInto(keyStatus.parentNode || keyStatus, null, async () => {
-      // keyStatus 位置由下方 render 设置；此处只更新文本
-    }, '凭据状态加载失败');
-    api.get('/api/settings').then(res => {
-      keyStatus.textContent = res.modelKeyConfigured
-        ? `已配置（${res.modelKeyMasked}）`
-        : '未配置';
+    const refreshKeyStatus = () => api.get('/api/settings').then(res => {
+      keyStatus.textContent = res.modelKeyConfigured ? `已配置（${res.modelKeyMasked}）` : '未配置';
       keyStatus.className = `badge ${res.modelKeyConfigured ? 'badge-ok' : 'badge-warn'}`;
     }).catch(() => { keyStatus.textContent = '读取失败'; });
+    refreshKeyStatus();
+    const keyInput = h('input', { class: 'input', type: 'password', placeholder: '粘贴 DeepSeek API Key（sk-…）' });
+    const keyBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存并生效' });
     busyBtn(keyBtn, '保存中…', async () => {
       const key = keyInput.value.trim();
       if (!key) return toast.err('先粘贴 API Key');
       const res = await api.post('/api/settings/model-key', { apiKey: key });
       toast.ok(res.hint || '模型凭据已热切换');
       keyInput.value = '';
-      api.get('/api/settings').then(res2 => {
-        keyStatus.textContent = res2.modelKeyConfigured ? `已配置（${res2.modelKeyMasked}）` : '未配置';
-        keyStatus.className = `badge ${res2.modelKeyConfigured ? 'badge-ok' : 'badge-warn'}`;
-      }).catch(() => {});
+      refreshKeyStatus();
     });
+    return [ui.sectionCard('模型凭据（DeepSeek API Key）',
+      ui.toolbar(ui.badge('状态：', 'muted'), keyStatus),
+      h('p', { class: 'muted small', style: 'margin:4px 0 8px', text: '配置后内容流水线即刻走 LLM 撰写（热切换，无需重启）。Key 服务端 0600 存储，页面只显示掩码。' }),
+      ui.toolbar(ui.grow(ui.field('API Key', keyInput)), ui.actions(keyBtn)))];
+  }
 
+  /** 设置渲染器：分段页签切换，三段互不堆叠（account 面板与设置抽屉共用） */
+  function renderSettings(container, initial = 'profile') {
+    let current = initial;
+    const tabBar = h('div', { class: 'tabs settings-tabs', role: 'tablist' },
+      SETTINGS_SECTIONS.map(([key, label]) => h('button', {
+        class: `tab${key === current ? ' active' : ''}`, type: 'button', 'data-section': key, text: label,
+      })));
+    const bodyBox = h('div');
+    const show = key => {
+      current = key;
+      tabBar.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.section === key));
+      render(bodyBox, ...buildSettingsSection(key));
+    };
+    tabBar.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => show(b.dataset.section)));
+    render(container, tabBar, bodyBox);
+    show(initial);
+  }
+
+  /** 左下角用户区 → 个人设置抽屉（默认打开指定段） */
+  function openSettingsDrawer(section = 'profile') {
+    if (!currentUser) return;
+    const body = h('div');
+    drawer.open({
+      kind: '个人设置',
+      title: currentUser.displayName || currentUser.username || '设置',
+      body,
+      foot: [h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() })],
+    });
+    renderSettings(body, section);
+  }
+
+  ROUTES.account = async box => {
+    if (!currentUser) {
+      render(box, ui.pageTitle('账户', '管理你的账号'), ui.empty('未启用多用户或未登录'));
+      return;
+    }
+    // 入口已迁至左下角用户区（点击头像/昵称打开设置抽屉）；本页保留给深链直达
+    const wrap = h('div');
     render(box,
-      ui.pageTitle('账户', '你的云操作系统身份'),
-      infoBox,
-      ui.sectionCard('模型凭据（DeepSeek API Key）',
-        ui.toolbar(ui.badge('状态：', 'muted'), keyStatus),
-        h('p', { class: 'muted small', style: 'margin:4px 0 8px', text: '配置后内容流水线即刻走 LLM 撰写（热切换，无需重启）。Key 服务端 0600 存储，页面只显示掩码。' }),
-        ui.toolbar(ui.grow(ui.field('API Key', keyInput)), ui.actions(keyBtn))),
-      h('div', { class: 'two-col' },
-        ui.sectionCard('修改昵称',
-          h('div', { class: 'form-grid form-grid-1' }, ui.field('昵称 displayName', displayNameInput)),
-          ui.toolbar(profileBtn)),
-        ui.sectionCard('修改密码（改密后全端下线）',
-          h('div', { class: 'form-grid form-grid-1' },
-            ui.field('当前密码', oldPwd), ui.field('新密码', newPwd), ui.field('确认新密码', newPwd2)),
-          ui.toolbar(pwdBtn, signOutAllBtn))));
+      ui.toolbar(
+        h('button', { class: 'btn btn-sm', type: 'button', text: '在侧下角打开设置抽屉', onclick: () => openSettingsDrawer() }),
+        h('span', { class: 'muted small', text: '或直接在此页管理——三段互不堆叠' })),
+      wrap);
+    renderSettings(wrap);
   };
 
   /* ===== 登录页（未登录时整页接管：隐藏侧栏与主区网格，登录后恢复） ===== */
@@ -2714,6 +2767,8 @@
       });
       initGlobalSearch();
       appMode._apply(appMode.current);
+      // 左下角用户区 → 个人设置抽屉（账号/安全/模型凭据三段式）
+      $('#rail-user')?.addEventListener('click', () => openSettingsDrawer());
       router.start();
     } else {
       badge.textContent = '未登录';

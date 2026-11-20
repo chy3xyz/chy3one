@@ -94,16 +94,18 @@
         <span>RaaS 计费</span>
       </a>
 
-      <div class="nav-group">系统</div>
-      <a href="#/account" data-route="account" data-mode="both">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 14c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/></svg>
+      <div class="nav-group nav-ghost-link">系统</div>
+      <!-- 账户入口已迁至左下角用户区（个人设置抽屉）；链接保留以满足路由白名单一一对应 -->
+      <a href="#/account" data-route="account" data-mode="both" class="nav-ghost-link" tabindex="-1" aria-hidden="true">
         <span>账户</span>
       </a>
 
-      <!-- 侧栏底部用户区（app.js 只改 textContent / hidden，位置无关） -->
+      <!-- 侧栏底部用户区：点击头像/昵称打开个人设置抽屉（app.js 只改 textContent / hidden，位置无关） -->
       <div class="rail-foot">
-        <div class="av" id="user-av" aria-hidden="true">O</div>
-        <span id="user-badge" class="who hidden"></span>
+        <button type="button" class="rail-user" id="rail-user" title="个人设置" aria-label="打开个人设置">
+          <span class="av" id="user-av" aria-hidden="true">O</span>
+          <span id="user-badge" class="who hidden"></span>
+        </button>
         <button id="logout-btn" class="btn btn-sm rail-logout hidden" type="button">退出</button>
       </div>
     </nav>

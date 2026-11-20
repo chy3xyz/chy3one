@@ -375,6 +375,20 @@ export class SqliteIdeaStore {
     return updated
   }
 
+  /** 创意改名：deriveIdeaName 的 16 字截断只能靠用户改名修正，这里提供正名通道 */
+  rename(id: string, name: string): Idea {
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('创意名不能为空')
+    const current = this.require(id)
+    const updatedAt = this.now()
+    this.db
+      .prepare('UPDATE ideas SET name = ?, updated_at = ? WHERE id = ?')
+      .run(trimmed, updatedAt, id)
+    const updated: Idea = { ...current, name: trimmed, updatedAt }
+    this.mirrorMeta(updated)
+    return updated
+  }
+
   /** 单域便捷更新：仅覆盖给定维度，其余保持原样（三域共演化，非线性流程） */
   updateDomain(id: string, key: DomainKey, detail: { summary?: string; points?: string[] }, note?: string): Idea {
     const current = this.require(id)

@@ -84,6 +84,17 @@ test('idea store: 三域迭代（ID-02）——整体替换与单域合并', () 
   store.close()
 })
 
+test('idea store: 改名——trim 落库 + 空名拒绝 + 元数据镜像更新', () => {
+  const store = new SqliteIdeaStore(join(dir, 'rename.db'))
+  const idea = store.create({ text: '宠物上门喂养服务的创意描述' })
+  const renamed = store.rename(idea.id, '  宠物上门喂养 · 调度平台  ')
+  assert.equal(renamed.name, '宠物上门喂养 · 调度平台')
+  assert.equal(store.get(idea.id)?.name, '宠物上门喂养 · 调度平台')
+  assert.ok(renamed.updatedAt >= idea.updatedAt)
+  assert.throws(() => store.rename(idea.id, '   '))
+  store.close()
+})
+
 test('idea store: 阶段推进同步 profile 与 meta（prd2.md 2.5）', () => {
   const root = join(dir, 'ideas-stage')
   const store = new SqliteIdeaStore(join(dir, 'stage.db'), root)

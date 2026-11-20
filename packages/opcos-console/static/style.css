@@ -1163,7 +1163,28 @@ body.mode-ops .sidenav a[data-mode="creator"] { display: none; }
 body.mode-creator .sidenav a[data-mode="ops"] { display: none; }
 
 /* 详情页等非导航路由的注册链接：存在但不可见（路由白名单与 data-route 一一对应约束） */
-.sidenav a.nav-ghost-link { display: none !important; }
+.sidenav .nav-ghost-link { display: none !important; }
+
+/* 侧栏底部用户区：可点击打开个人设置抽屉 */
+.rail-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s;
+}
+.rail-user:hover { background: rgba(255, 255, 255, 0.09); }
+.rail-user .who { color: #fff; }
 
 /* 视角为空值的组标题照常显示；隐藏链接的 nav-group 前后留白不塌 */
 
@@ -1415,6 +1436,9 @@ body.cmode .funnel-num { font-size: 34px; }
 /* 创意详情页顶部返回区 */
 .idea-detail-toolbar { margin-bottom: 14px; }
 
+/* 创意标题：长名换行不截断（改名入口在标题右侧） */
+.idea-title { word-break: break-word; white-space: normal; flex: 1; min-width: 0; }
+
 /* 三域编辑器：三等分宽栏（card-grid 的 200px 最小宽会把引导问题挤成竖堆） */
 .domain-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; align-items: start; }
 .domain-grid .memory-card { min-width: 0; }
@@ -1438,6 +1462,13 @@ body.cmode .funnel-num { font-size: 34px; }
 .step-next:hover .dot { background: var(--opc-lime); }
 .step-future { opacity: 0.55; cursor: not-allowed; }
 .ln.done { background: #000; }
+
+/* 抽屉内的紧凑适配：窄容器单列 + 缩小统计字号 */
+.drawer .card-grid { grid-template-columns: 1fr; gap: 12px; }
+.drawer .stat-value { font-size: 20px; }
+.drawer .stat-value.stat-value-sm { font-size: 13px; }
+.drawer .big-number { font-size: 28px; }
+.drawer .two-col, .drawer .three-col, .drawer .domain-grid { grid-template-columns: 1fr; }
 
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 
