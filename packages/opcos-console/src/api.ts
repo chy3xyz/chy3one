@@ -2107,7 +2107,10 @@ async function dispatchApi(
             : 0,
         contents: {
           runs: content ? content.stats().runs : 0,
-          published: setup.contentEvents.filter((event) => event.type === 'content_publish').length,
+          // 发布数与发布历史同源（持久表）：contentEvents 是内存环形缓冲，重启清零曾与历史对不上
+          published: content?.history
+            ? content.history(1000).filter((h) => h.success).length
+            : setup.contentEvents.filter((event) => event.type === 'content_publish').length,
         },
         skills: {
           drafts: forge ? forge.listDrafts().length : 0,

@@ -425,6 +425,13 @@ h1, h2, h3, h4 { margin: 0; font-weight: 540; letter-spacing: -0.2px; }
 .tbl td .row-actions { flex-wrap: nowrap; }
 .tbl td:last-child, .tbl th:last-child { white-space: nowrap; }
 
+/* 长文本单元格：单行截断（标题列），悬停 title 可见全文 */
+.cell-clip { display: inline-block; max-width: 520px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.cell-nowrap { white-space: nowrap; }
+
+/* 发布历史：平台/时间列不换行 */
+.pub-table td:nth-child(2), .pub-table td:nth-child(3) { white-space: nowrap; }
+
 .key-code {
   font-family: var(--mono);
   font-size: 11.5px;

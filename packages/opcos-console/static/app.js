@@ -1904,8 +1904,10 @@
       ui.sectionCard(null,
         ui.toolbar(ui.field('关键词 q', qInput), ui.field('类别 category', categoryInput),
           ui.field('生命周期阶段 stage', stageSelect), ui.field('兼容版本 compat', compatInput),
-          ui.actions(searchBtn, totalText),
-          h('span', { class: 'muted small', text: '安装到：' }), targetSelect)),
+          ui.actions(searchBtn, totalText)),
+        ui.toolbar(
+          ui.field('安装到（个人全局或某个创意子操作系统）', targetSelect),
+          h('span', { class: 'muted small', style: 'padding-bottom:8px', text: '安装动作按此目标执行。' }))),
       tableBox,
       ui.sectionCard('Skill 草案（本能提炼）', draftsBox));
     await Promise.all([search(), loadDrafts(), loadPublish()]);
@@ -2323,21 +2325,24 @@
               : null)))
         : ui.empty('还没有作品——记一个创意（回总览），10 秒生成第一篇'));
     };
-    const renderStats = (data, events) => {
+    const renderStats = (data, funnelContents) => {
       const mode = (data && data.mode) || {};
+      const c = funnelContents || {};
       render(statsBox, h('div', { class: 'card-grid' }, [
-        ui.statCard('流水线运行次数', num(data && data.runs), '含失败（stats.runs）'),
-        ui.statCard('content_publish 事件', num(events.length)),
+        // 口径说明：published 与发布历史同源（持久表）；runs 为本次进程内存计数（重启清零）
+        ui.statCard('运行次数（本次进程）', num(c.runs), '含失败 · 重启清零'),
+        ui.statCard('累计发布（持久）', num(c.published), '发布历史同源'),
         ui.statCard('撰写模式', mode.llm ? 'DeepSeek LLM' : '模板策略', mode.llm ? '已配置 API Key' : '未配置 API Key'),
         ui.statCard('热点选题', mode.hotSearch ? '已接入 web' : '常青库兜底'),
       ]));
     };
     const quiet = async () => {
       try {
-        const [evRes, statsRes] = await Promise.all([api.get('/api/content/events'), api.get('/api/content/stats')]);
+        const [evRes, statsRes, funnelRes] = await Promise.all([
+          api.get('/api/content/events'), api.get('/api/content/stats'), api.get('/api/funnel')]);
         const events = (evRes && evRes.events) || [];
         renderEvents(events);
-        renderStats(statsRes, events);
+        renderStats(statsRes, (funnelRes || {}).contents || {});
       } catch { /* 轮询失败静默，保留上一帧 */ }
     };
     const historyBox = h('div');
@@ -2345,12 +2350,14 @@
       const res = await api.get('/api/content/history?limit=50');
       const items = (res && res.history) || [];
       if (!items.length) return ui.empty('还没有发布记录——第一篇作品发布后这里会累积成作品库');
-      return ui.table(['标题', '平台', '时间', '链接'], items.map(h2 => [
-        h('span', { text: h2.title || '—' }),
-        PLATFORM_LABELS[h2.platform] || h2.platform || '—',
-        fmtTime(h2.ranAt),
+      const table = ui.table(['标题', '平台', '时间', '链接'], items.map(h2 => [
+        h('span', { class: 'cell-clip', title: h2.title || '', text: h2.title || '—' }),
+        h('span', { class: 'cell-nowrap', text: PLATFORM_LABELS[h2.platform] || h2.platform || '—' }),
+        h('span', { class: 'cell-nowrap', text: fmtTime(h2.ranAt) }),
         h2.url ? h('a', { href: h2.url, target: '_blank', rel: 'noopener noreferrer', text: '查看' }) : '—',
       ]));
+      table.classList.add('pub-table');
+      return table;
     }, '发布历史加载失败');
 
     render(box,
