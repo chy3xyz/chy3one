@@ -1715,7 +1715,7 @@
     });
     onEnter(titleInput, () => addBtn.click());
     render(box,
-      ui.pageTitle('共享任务板', '团队在为你的创意干活——谁认领了什么一目了然'),
+      ui.pageTitle('任务板', '团队在为你的创意干活——谁认领了什么一目了然'),
       ui.sectionCard(null,
         ui.toolbar(ui.grow(ui.field('任务标题', titleInput)), ui.grow(ui.field('当前成员', memberInput)),
           ui.actions(addBtn))),
@@ -1781,7 +1781,7 @@
       load();
     });
     render(box,
-      ui.pageTitle('共享黑板', '团队的公共记忆墙，谁写了什么都能看见'),
+      ui.pageTitle('黑板', '团队的公共记忆墙，谁写了什么都能看见'),
       h('div', { class: 'tabs' }, ...['global', 'workflow'].map(s =>
         (tabButtons[s] = h('button', {
           class: 'tab', type: 'button',
@@ -1932,7 +1932,7 @@
     onEnter(qInput, search);
     stageSelect.addEventListener('change', search);
     render(box,
-      ui.pageTitle('上货架', '你的重复劳动，别人愿意付钱'),
+      ui.pageTitle('Skill 市场', '把重复劳动上架成别人愿意付钱的能力'),
       ui.sectionCard('从草案上架（草案 → 签名包 → 市场索引）', publishBox),
       ui.sectionCard(null,
         ui.toolbar(ui.field('关键词 q', qInput), ui.field('类别 category', categoryInput),
@@ -1956,10 +1956,10 @@
       amountInput = h('input', { class: 'input', type: 'number', min: '1', step: '1', value: '100' }),
       orderBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '创建订单' }),
       splitBox = h('div'),
-      listBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '必填：按 buyerId 过滤' }),
+      listBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '必填：按 buyerId 过滤', style: 'max-width:360px' }),
       refreshBtn = h('button', { class: 'btn', type: 'button', text: '查询订单' }),
       listBox = h('div'),
-      subBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '买家 ID' }),
+      subBuyerInput = h('input', { class: 'input', value: defaultBuyer, placeholder: '买家 ID', style: 'max-width:360px' }),
       subRefreshBtn = h('button', { class: 'btn', type: 'button', text: '刷新订阅' }),
       subListBox = h('div');
     skillSelect.addEventListener('change', () => {
@@ -2098,16 +2098,16 @@
     }, '订阅加载失败');
     subRefreshBtn.addEventListener('click', loadSubs);
     render(box,
-      ui.pageTitle('订单', '每一笔确认的订单，创作者拿 85%'),
+      ui.pageTitle('订单交易', '每一笔确认的订单，创作者拿 85%'),
       ui.sectionCard('下单',
         ui.toolbar(ui.grow(ui.field('Skill', skillSelect)), ui.field('买家 buyerId', buyerInput),
           ui.field('金额（分）', amountInput), ui.actions(orderBtn))),
       splitBox,
       ui.sectionCard('我的订阅',
-        ui.toolbar(ui.grow(ui.field('买家 buyerId', subBuyerInput)), ui.actions(subRefreshBtn)),
+        ui.toolbar(ui.field('买家 buyerId', subBuyerInput), ui.actions(subRefreshBtn)),
         subListBox),
       ui.sectionCard('订单列表',
-        ui.toolbar(ui.grow(ui.field('按买家过滤', listBuyerInput)), ui.actions(refreshBtn)),
+        ui.toolbar(ui.field('按买家过滤', listBuyerInput), ui.actions(refreshBtn)),
         listBox));
     await Promise.all([loadSkillOptions(), loadOrders(), loadSubs()]);
   };
@@ -2165,7 +2165,7 @@
     }, '收入趋势加载失败');
     render(detailBox, ui.empty('点击上方创作者卡片，即可展开其分成流水明细'));
     render(box,
-      ui.pageTitle('创作者中心', '你赚到的每一笔，都在这里'),
+      ui.pageTitle('我的收入', '你赚到的每一笔，都在这里'),
       ui.sectionCard('近 30 天收入趋势（按日聚合）', trendBox),
       ui.sectionCard('创作者分成账户', listBox),
       ui.sectionCard(null, detailTitle, detailBox));
@@ -2281,7 +2281,7 @@
       loadSummary();
     });
     render(box,
-      ui.pageTitle('数字员工计费', 'AI 自己解决问题才收钱，转人工免费'),
+      ui.pageTitle('RaaS 计费', '数字员工自己解决问题才收钱，转人工免费'),
       ui.sectionCard('任务结算',
         ui.toolbar(ui.field('任务 taskId', taskIdInput), ui.field('数字员工 agentId', agentIdInput),
           ui.field('处理结果 resolution', resolutionSelect), ui.actions(completeBtn)),
@@ -2395,7 +2395,7 @@
     }, '发布历史加载失败');
 
     render(box,
-      ui.pageTitle('出作品', '把创意变成能发布、能涨粉的作品'),
+      ui.pageTitle('内容引擎', '把创意变成能发布、能涨粉的作品'),
       ui.sectionCard('运行流水线',
         ui.toolbar(ui.field('用哪个创意的人设（CO-02）', ideaSelect), ui.actions(runBtn),
           h('span', { class: 'muted small', text: '指定创意则用该创意记忆体的人设与选题；默认五平台分发（CO-03）。配置 DeepSeek API Key 后走 LLM 撰写。' })),
