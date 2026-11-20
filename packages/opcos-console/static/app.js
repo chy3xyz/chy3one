@@ -1424,19 +1424,21 @@
 
     // 返回节点而非直接渲染：loadInto 统一落位（fn 内自行渲染会被其后的 render(box, undefined) 清空）
     const renderList = ideas => ideas.length
-      ? h('div', { class: 'card-grid' }, ideas.map(idea => h('div', {
-          class: 'card memory-card clickable-card',
+      ? h('div', { class: 'card-grid market-grid' }, ideas.map(idea => h('div', {
+          class: 'card market-card clickable-card',
           onclick: ev => {
-            if (ev.target.closest('button,a')) return; // 关注/去详情按钮不触发抽屉
+            if (ev.target.closest('button,a')) return; // 关注/详情按钮不触发抽屉
             palette.openIdeaDrawer(idea.ideaId, idea.name);
           },
         },
-          h('div', { class: 'memory-head' },
-            h('strong', { text: idea.name }),
-            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
-          h('p', { class: 'memory-content', text: idea.problemSummary || idea.solutionSummary || '—' }),
-          h('div', { class: 'stat-sub' },
-            `关注 ${num(idea.followers)} · 资产 ${money(idea.financeTotalCents)} · GEO ${Math.round((idea.geoVisibility || 0) * 100)}%`),
+          h('div', { class: 'market-card-top' },
+            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted'),
+            h('span', { class: 'chip-static', text: `关注 ${num(idea.followers)}` })),
+          h('strong', { class: 'market-name', title: idea.name, text: idea.name }),
+          h('p', { class: 'market-desc', text: idea.problemSummary || idea.solutionSummary || '三域摘要待完善' }),
+          h('div', { class: 'market-stats' },
+            h('span', {}, '资产 ', h('b', { text: money(idea.financeTotalCents) })),
+            h('span', {}, 'GEO ', h('b', { text: `${Math.round((idea.geoVisibility || 0) * 100)}%` }))),
           h('div', { class: 'toolbar-actions' },
             h('button', {
               class: 'btn btn-sm', type: 'button', text: '+ 关注',
@@ -1446,7 +1448,7 @@
                 search();
               },
             }),
-            h('a', { class: 'btn btn-sm', href: '#/ideas', text: '去详情' })))))
+            h('a', { class: 'btn btn-sm', href: `#/idea?id=${idea.ideaId}`, text: '查看详情' })))))
       : ui.empty('还没有发布到市场的创意——在「我的创意」详情里点「发布到市场」');
 
     const search = () => loadInto(listBox, '检索中…', async () => {
@@ -1456,7 +1458,7 @@
       if (stageSelect.value) params.set('stage', stageSelect.value);
       params.set('limit', '50');
       const res = await api.get(`/api/market/ideas?${params.toString()}`);
-      listTitle.textContent = q || stageSelect.value ? `全网创意（命中 ${res.ideas.length}）` : '全网创意';
+      listTitle.textContent = `全网创意（${res.ideas.length}）`;
       return renderList(res.ideas || []);
     }, '创意市场检索失败');
     searchBtn.addEventListener('click', search);
@@ -1464,12 +1466,13 @@
     stageSelect.addEventListener('change', search);
 
     const renderRank = data => {
-      const rows = by => (data && data[by] || []).map((s, i) => [i + 1, s.name, IDEA_STAGE_LABELS[s.stage] || s.stage,
+      // 窄卡三列：# / 创意 / 指标（阶段信息货架卡与详情里都有，这里砍掉避免竖排）
+      const rows = by => (data && data[by] || []).map((s, i) => [i + 1, s.name,
         by === 'assets' ? money(s.financeTotalCents) : by === 'community' ? `${num(s.followers)} 关注` : `${Math.round((s.geoVisibility || 0) * 100)}%`]);
       render(rankBox, h('div', { class: 'three-col' },
-        ui.sectionCard('资产榜', ui.table(['#', '创意', '阶段', '收入'], rows('assets'))),
-        ui.sectionCard('社区榜', ui.table(['#', '创意', '阶段', '热度'], rows('community'))),
-        ui.sectionCard('GEO 榜', ui.table(['#', '创意', '阶段', '可见性'], rows('geo')))));
+        ui.sectionCard('资产榜', ui.table(['#', '创意', '收入'], rows('assets'))),
+        ui.sectionCard('社区榜', ui.table(['#', '创意', '热度'], rows('community'))),
+        ui.sectionCard('GEO 榜', ui.table(['#', '创意', '可见性'], rows('geo')))));
     };
     const loadRank = () => api.get('/api/market/rankings').then(renderRank).catch(() => renderRank(null));
 
@@ -1482,8 +1485,8 @@
       const ideas = (res && res.ideas) || [];
       if (!ideas.length) return ui.empty('还没有关注的创意——在下方列表点「+ 关注」，阶段变更会通知你');
       return ui.table(['创意', '阶段', '关注者数', ''], ideas.map(s => [
-        h('a', { href: `#/ideas?id=${s.ideaId}`, text: s.name }),
-        IDEA_STAGE_LABELS[s.stage] || s.stage, num(s.followers),
+        h('a', { href: `#/idea?id=${s.ideaId}`, text: s.name }),
+        ui.badge(IDEA_STAGE_LABELS[s.stage] || s.stage, IDEA_STAGE_VARIANTS[s.stage] || 'muted'), num(s.followers),
         h('button', { class: 'btn btn-sm', type: 'button', text: '取消关注',
           onclick: async () => {
             await api.post(`/api/market/ideas/${s.ideaId}/follow`, {
@@ -1514,9 +1517,9 @@
         ui.toolbar(ui.grow(ui.field('关键词 q', searchInput)), ui.field('阶段', stageSelect), ui.actions(searchBtn)),
         listTitle,
         listBox),
-      ui.sectionCard('我的关注', followsBox),
-      h('p', { class: 'muted small', style: 'margin:0' }, '我的通知'),
-      notifBox,
+      h('div', { class: 'two-col' },
+        ui.sectionCard('我的关注', followsBox),
+        ui.sectionCard('我的通知', notifBox)),
       rankBox);
 
     await Promise.all([search(), loadRank(), loadFollows(), loadNotif()]);
