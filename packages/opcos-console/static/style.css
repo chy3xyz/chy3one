@@ -1421,6 +1421,24 @@ body.cmode .funnel-num { font-size: 34px; }
 .domain-grid .memory-card ul { padding-left: 18px; margin: 6px 0 10px; }
 .domain-grid .memory-card li { margin-bottom: 4px; line-height: 1.55; }
 
+/* 生命周期步骤条：圆点 + 连线（刻意区别于功能页签的胶囊 tabs——它是推进器不是切换器） */
+.steps { display: flex; align-items: center; gap: 10px; margin: 2px 0 8px; flex-wrap: wrap; }
+.step { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--opc-faint); user-select: none; }
+.step .dot { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--opc-border); background: #fff; flex: none; }
+.step .ln { width: 38px; height: 2px; background: var(--opc-border); flex: none; border-radius: 1px; }
+.step-past { color: var(--opc-muted); cursor: pointer; transition: color 0.14s; }
+.step-past .dot { background: #000; border-color: #000; }
+.step-past:hover { color: #000; }
+.step-past:focus-visible { outline-offset: 3px; }
+.step-current { color: #000; font-weight: 540; }
+.step-current .dot { background: #000; border-color: #000; box-shadow: 0 0 0 3px var(--opc-lime); }
+.step-next { color: #000; cursor: pointer; }
+.step-next .dot { border-style: dashed; border-color: #000; transition: background 0.14s; }
+.step-next .step-t { text-decoration: underline dotted; text-underline-offset: 3px; }
+.step-next:hover .dot { background: var(--opc-lime); }
+.step-future { opacity: 0.55; cursor: not-allowed; }
+.ln.done { background: #000; }
+
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 
 @media (max-width: 1280px) {

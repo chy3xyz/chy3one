@@ -842,41 +842,54 @@
         const stageIndex = IDEA_STAGES.indexOf(idea.stage);
         const openDetail = loadDetail; // 区块内刷新引用（阶段推进/保存/回滚后重载详情）
 
-        // 阶段进度：合法的下一阶段可点击推进（生命周期线性单向，prd2.md 1.2）；
-        // 点击展开内联迁移表单（不使用浏览器原生弹窗）
-        const stepper = h('div', { class: 'tabs' }, IDEA_STAGES.map((s, i) => {
-          const isCurrent = s === idea.stage;
-          const isNext = i === stageIndex + 1;
-          const btn = h('button', { class: `tab${isCurrent ? ' active' : ''}`, type: 'button' },
-            h('span', { text: IDEA_STAGE_LABELS[s] }));
-          if (isCurrent) btn.disabled = true;
-          else if (isNext) {
-            btn.title = `推进到${IDEA_STAGE_LABELS[s]}`;
-            btn.addEventListener('click', () => {
-              const existing = $('#transition-form');
-              if (existing) existing.remove();
-              const noteInput = h('input', { class: 'input', placeholder: `推进依据，如：MVP 验证过线 / 内测数据达标` });
-              const confirmBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '确认推进' });
-              const cancelBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '取消' });
-              const form = h('div', { class: 'card section-card', id: 'transition-form', style: 'margin-top:10px' },
-                h('p', { class: 'small', style: 'margin:0 0 6px' },
-                  h('strong', { text: `推进到「${IDEA_STAGE_LABELS[s]}」` }), ' —— 生命周期只允许线性推进，此操作会写入决策记忆'),
-                ui.toolbar(ui.grow(ui.field('推进依据 note', noteInput)), ui.actions(confirmBtn, cancelBtn)));
-              stepper.after(form);
-              cancelBtn.addEventListener('click', () => form.remove());
-              confirmBtn.addEventListener('click', async () => {
-                confirmBtn.disabled = true;
-                confirmBtn.textContent = '推进中…';
-                try {
-                  const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: noteInput.value.trim() || undefined });
-                  toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
-                  await openDetail();
-                } catch { confirmBtn.disabled = false; confirmBtn.textContent = '确认推进'; }
-              });
-            });
-          } else btn.disabled = true;
-          return btn;
-        }));
+        // 阶段进度：生命周期步骤条（圆点+连线，刻意区别于下方功能页签的胶囊样式）。
+        // 线性单向（prd2.md 1.2）：只有「下一阶段」可点击推进（展开内联迁移表单）；
+        // 已完成阶段点击给出不可回退说明；未来阶段禁用并解释原因
+        const openTransitionForm = s => {
+          const existing = $('#transition-form');
+          if (existing) existing.remove();
+          const noteInput = h('input', { class: 'input', placeholder: `推进依据，如：MVP 验证过线 / 内测数据达标` });
+          const confirmBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '确认推进' });
+          const cancelBtn = h('button', { class: 'btn btn-sm', type: 'button', text: '取消' });
+          const form = h('div', { class: 'card section-card', id: 'transition-form', style: 'margin-top:10px' },
+            h('p', { class: 'small', style: 'margin:0 0 6px' },
+              h('strong', { text: `推进到「${IDEA_STAGE_LABELS[s]}」` }), ' —— 生命周期只允许线性推进，此操作会写入决策记忆'),
+            ui.toolbar(ui.grow(ui.field('推进依据 note', noteInput)), ui.actions(confirmBtn, cancelBtn)));
+          stepper.after(form);
+          cancelBtn.addEventListener('click', () => form.remove());
+          confirmBtn.addEventListener('click', async () => {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = '推进中…';
+            try {
+              const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: noteInput.value.trim() || undefined });
+              toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
+              await openDetail();
+            } catch { confirmBtn.disabled = false; confirmBtn.textContent = '确认推进'; }
+          });
+        };
+        const stepper = h('div', { class: 'steps', role: 'list', 'aria-label': '生命周期阶段（线性单向推进）' },
+          IDEA_STAGES.flatMap((s, i) => {
+            const state = i < stageIndex ? 'past' : i === stageIndex ? 'current' : i === stageIndex + 1 ? 'next' : 'future';
+            const label = IDEA_STAGE_LABELS[s];
+            const node = h('div', { class: `step step-${state}`, role: 'listitem', tabindex: state === 'next' || state === 'past' ? '0' : null },
+              h('i', { class: 'dot', 'aria-hidden': 'true' }),
+              h('span', { class: 'step-t', text: label }));
+            if (state === 'next') {
+              node.title = `点击推进到「${label}」——生命周期线性单向`;
+              node.addEventListener('click', () => openTransitionForm(s));
+              node.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openTransitionForm(s); } });
+            } else if (state === 'past') {
+              node.title = '已完成阶段：生命周期不可回退，历史可从「三域版本链」回滚';
+              node.addEventListener('click', () => toast.info(`「${label}」已完成——不可回退；如需回到旧版三域，用下方「三域版本链」回滚`));
+            } else if (state === 'current') {
+              node.title = '当前阶段';
+            } else {
+              node.title = `按顺序推进：先到「${IDEA_STAGE_LABELS[IDEA_STAGES[i - 1]]}」`;
+            }
+            const out = [node];
+            if (i < IDEA_STAGES.length - 1) out.push(h('i', { class: `ln${i < stageIndex ? ' done' : ''}`, 'aria-hidden': 'true' }));
+            return out;
+          }));
 
         const domainCards = DOMAIN_KEYS.map(key => {
           const domain = domains[key] || { summary: '', points: [] };
