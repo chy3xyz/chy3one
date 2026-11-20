@@ -762,9 +762,38 @@
     };
 
     const loadList = () => loadInto(listBox, null, async () => {
-      const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
+      // 活跃库与归档库分开取（后端 listForUser 默认过滤 archived；?archived=1 仅归档项）
+      const [activeRes, archivedRes] = await Promise.all([
+        api.get('/api/ideas'),
+        api.get('/api/ideas?archived=1').catch(() => ({ ideas: [] })),
+      ]);
+      const ideas = (activeRes || {}).ideas || [];
+      const archivedIdeas = (archivedRes || {}).ideas || [];
       listTitle.textContent = `创意库（${ideas.length}）`;
-      if (!ideas.length) return ui.empty('创意库是空的——回总览漏斗记下第一个创意');
+      if (!ideas.length && !archivedIdeas.length) return ui.empty('创意库是空的——回总览漏斗记下第一个创意');
+      const archiveToggle = archivedIdeas.length
+        ? h('details', { class: 'collapse', style: 'margin:10px 0 0' },
+            h('summary', { text: `已归档（${archivedIdeas.length}）——点开可恢复` }),
+            h('div', { style: 'margin-top:8px' }, ui.table(['创意', '阶段', '归档时间', ''],
+              archivedIdeas.map(idea => [
+                h('strong', { text: idea.name || idea.id }),
+                ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', 'muted'),
+                fmtTime(idea.updatedAt || idea.createdAt),
+                h('button', {
+                  class: 'btn btn-sm', type: 'button', text: '恢复',
+                  onclick: () => {
+                    openInlineForm(`restore-${idea.id}`, `恢复「${idea.name || idea.id}」`, '', () =>
+                      api.post(`/api/ideas/${idea.id}/archive`, { archived: false }), () => {
+                      toast.ok('已恢复到创意库');
+                      loadList();
+                    }, { noInput: true, confirmText: '确认恢复' });
+                  },
+                }),
+              ]))))
+        : null;
+      if (!ideas.length) {
+        return [ui.empty('活跃创意都在归档区——点开上方「已归档」可恢复，或回总览漏斗记下新创意'), archiveToggle].filter(Boolean);
+      }
       const table = ui.table(['创意', '阶段', '问题域摘要', '创建时间', '操作'],
         ideas.map(idea => [
           h('strong', { text: idea.name || idea.id }),
@@ -779,7 +808,7 @@
               onclick: () => {
                 openInlineForm(`archive-${idea.id}`, `归档「${idea.name || idea.id}」`, '', () =>
                   api.post(`/api/ideas/${idea.id}/archive`, { archived: true }), () => {
-                  toast.ok('已归档（可在需要时恢复）');
+                  toast.okAction('已归档', { label: '查看已归档 →', onclick: () => { loadList(); } });
                   loadList();
                 }, { noInput: true, confirmText: '确认归档', danger: '将从创意库与市场隐藏，数据保留可恢复' });
               },
@@ -794,7 +823,7 @@
           if (href) location.hash = href.slice(1);
         });
       });
-      return table;
+      return [table, archiveToggle].filter(Boolean);
     }, '创意列表加载失败');
 
     render(box,
@@ -1808,7 +1837,11 @@
             ...(targetSelect.value ? { ideaId: targetSelect.value } : {}),
             ...(currentUser ? { buyerId: currentUser.username } : {}),
           });
-          toast.ok(`安装成功：${res && res.installedPath}${res && res.ideaId ? '（已装入创意子操作系统）' : ''}`);
+          // 反馈说「装到哪」而不是服务器路径（用户关心的是目标语义）
+          const targetName = res && res.ideaId
+            ? `创意 ${res.ideaId.slice(0, 12)} 的子操作系统`
+            : '个人（全局）';
+          toast.ok(`已安装「${skill.name}」到${targetName}`);
           btn.textContent = '已安装';
         } catch (err) {
           btn.disabled = false; btn.textContent = '重试';
@@ -2259,7 +2292,7 @@
 
   /* ===== 面板：Content Engine（系统三） ===== */
   ROUTES.content = async box => {
-    let publishedCount = 0; // 最近 content_publish 事件数（「第 n 份作品」toast 计数用，renderEvents 刷新）
+    let publishedCount = 0; // 持久发布数（/api/funnel，与发布历史同源；「第 n 份作品」toast 计数用）
     const runBtn = h('button', { class: 'btn btn-primary', type: 'button', text: '马上出作品' }),
       ideaSelect = h('select', { class: 'input' }, h('option', { value: '', text: '全局人设（不指定创意）' })),
       resultBox = h('div'),
@@ -2314,7 +2347,6 @@
       quiet();
     });
     const renderEvents = events => {
-      publishedCount = events.length;
       render(eventsBox, events.length
         ? h('ul', { class: 'timeline' }, events.map(ev => h('li', { class: 'timeline-item' },
             h('div', { class: 'tl-head' },
@@ -2341,6 +2373,8 @@
         const [evRes, statsRes, funnelRes] = await Promise.all([
           api.get('/api/content/events'), api.get('/api/content/stats'), api.get('/api/funnel')]);
         const events = (evRes && evRes.events) || [];
+        // 持久口径：与发布历史同源（重启不清零），「第 n 份作品」计数不再重复
+        publishedCount = ((funnelRes || {}).contents || {}).published || 0;
         renderEvents(events);
         renderStats(statsRes, (funnelRes || {}).contents || {});
       } catch { /* 轮询失败静默，保留上一帧 */ }

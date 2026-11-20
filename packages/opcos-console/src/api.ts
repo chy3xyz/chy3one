@@ -1825,10 +1825,14 @@ async function dispatchApi(
         // 多用户：按登录者可见性过滤；v1 无鉴权模式保持全量列表
         if (setup.auth) {
           const owner = requireUser(user)
-          sendJson(req, res, 200, { ideas: store.listForUser(owner.id, userTeamIds(setup, owner)) })
+          // ?archived=1 → 仅归档项（创意库「已归档」折叠区/恢复入口的数据源）
+          const archivedOnly = url.searchParams.get('archived') === '1'
+          sendJson(req, res, 200, { ideas: store.listForUser(owner.id, userTeamIds(setup, owner), archivedOnly) })
           return
         }
-        sendJson(req, res, 200, { ideas: store.list() })
+        const archivedOnly = url.searchParams.get('archived') === '1'
+        const all = store.list()
+        sendJson(req, res, 200, { ideas: archivedOnly ? all.filter((i) => i.archived) : all })
         return
       }
       const memory = requireService<MemoryService>(setup, 'opc.memory')

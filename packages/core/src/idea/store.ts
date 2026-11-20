@@ -325,17 +325,17 @@ export class SqliteIdeaStore {
   }
 
   /**
-  /**
    * 用户可见的创意列表（多用户口径，新建在前）：
    * 我拥有的 ∪ 我所在团队的 ∪ 存量无主（owner_id IS NULL，登录用户均可见）。
-   * 归档项不出现（可用 setArchived 恢复）。
+   * 归档项不出现（可用 setArchived 恢复；archivedOnly='only' 时仅返回归档项——恢复入口的数据源）。
    */
-  listForUser(userId: string, teamIds: readonly string[] = []): Idea[] {
+  listForUser(userId: string, teamIds: readonly string[] = [], archivedOnly = false): Idea[] {
     const teamFilter = teamIds.length > 0 ? `OR team_id IN (${teamIds.map(() => '?').join(', ')})` : ''
+    const archivedClause = archivedOnly ? 'archived = 1' : '(archived IS NULL OR archived = 0)'
     const rows = this.db
       .prepare(
         `SELECT id, name, stage, domains_json, created_at, updated_at, owner_id, team_id, archived FROM ideas
-         WHERE (owner_id = ? OR owner_id IS NULL ${teamFilter}) AND (archived IS NULL OR archived = 0)
+         WHERE (owner_id = ? OR owner_id IS NULL ${teamFilter}) AND ${archivedClause}
          ORDER BY created_at DESC`,
       )
       .all(...[userId, ...teamIds]) as unknown as IdeaRow[]
