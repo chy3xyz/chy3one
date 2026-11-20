@@ -422,6 +422,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 540; letter-spacing: -0.2px; }
 .tbl tbody tr:hover { background: var(--opc-row-hover); }
 .tbl tbody tr.clickable { cursor: pointer; }
 .tbl a { white-space: nowrap; }
+.tbl td .row-actions { flex-wrap: nowrap; }
 
 .key-code {
   font-family: var(--mono);
@@ -1161,6 +1162,9 @@ body.login-mode .login-wrap { min-height: 100vh; }
 body.mode-ops .sidenav a[data-mode="creator"] { display: none; }
 body.mode-creator .sidenav a[data-mode="ops"] { display: none; }
 
+/* 详情页等非导航路由的注册链接：存在但不可见（路由白名单与 data-route 一一对应约束） */
+.sidenav a.nav-ghost-link { display: none !important; }
+
 /* 视角为空值的组标题照常显示；隐藏链接的 nav-group 前后留白不塌 */
 
 /* ---------------- 创作视角密度档（comfortable ×1.12，借鉴原型 body.cmode） ---------------- */
@@ -1407,6 +1411,9 @@ body.cmode .funnel-num { font-size: 34px; }
 .skel i:nth-child(3) { width: 48%; }
 .skel i:nth-child(4) { width: 86%; }
 @keyframes sk-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+/* 创意详情页顶部返回区 */
+.idea-detail-toolbar { margin-bottom: 14px; }
 
 /* ---------------- 响应式：窄屏导航折叠为顶部黑色横向滚动条 ---------------- */
 

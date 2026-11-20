@@ -259,6 +259,7 @@
   const PANEL_META = {
     overview:   { title: '总览', group: '工作台', mode: 'both' },
     ideas:      { title: '我的创意', group: '工作台', mode: 'creator' },
+    idea:       { title: '创意详情', group: '工作台', mode: 'creator' },
     content:    { title: '内容引擎', group: '工作台', mode: 'creator' },
     memory:     { title: '创意资产', group: '工作台', mode: 'creator' },
     team:       { title: 'AI 组队', group: '协作', mode: 'creator' },
@@ -369,7 +370,7 @@
     render(q, apiData) {
       const kw = q.trim().toLowerCase();
       const pages = Object.entries(PANEL_META)
-        .filter(([name, meta]) => !kw || name.includes(kw) || meta.title.toLowerCase().includes(kw))
+        .filter(([name, meta]) => name !== 'idea' && (!kw || name.includes(kw) || meta.title.toLowerCase().includes(kw)))
         .map(([name, meta]) => ({
           kind: MODE_LABELS[meta.mode] || meta.mode,
           label: meta.title,
@@ -448,7 +449,7 @@
           title: idea.name || idea.id,
           body: domainsView,
           foot: [
-            h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '打开完整详情', onclick: () => { drawer.close(); location.hash = `#/ideas?id=${idea.id}`; } }),
+            h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '打开完整详情', onclick: () => { drawer.close(); location.hash = `#/idea?id=${idea.id}`; } }),
             h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() }),
           ],
         });
@@ -499,7 +500,7 @@
 
   /* ===== router（hash 路由，刷新保持） ===== */
   const ROUTES = {}; // name -> async render(container)
-  const ROUTE_NAMES = ['overview', 'ideas', 'market', 'teams', 'account', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
+  const ROUTE_NAMES = ['overview', 'ideas', 'idea', 'market', 'teams', 'account', 'team', 'board', 'blackboard', 'skills', 'orders', 'creators', 'bills', 'billing', 'content', 'memory'];
   const router = {
     current() {
       // 深链支持：#/ideas?id=xxx → 面板名 + query（创意详情可分享给队友）
@@ -747,11 +748,8 @@
 
   ROUTES.ideas = async box => {
     const listBox = h('div');
-    const detailBox = h('div');
+    const listTitle = h('h3', { class: 'card-title', text: '创意库' });
     const mountLine = h('p', { class: 'muted small', style: 'margin:8px 0 0', text: '' });
-    let selectedId = null;
-    let detailTab = 'domains'; // 二级 Tab 记忆：同面板内切换创意保持所在页签
-    const domainDirty = new Set(); // 有未保存修改的三域（页签切换前确认）
 
     const refreshMounted = async () => {
       try {
@@ -765,50 +763,84 @@
 
     const loadList = () => loadInto(listBox, null, async () => {
       const ideas = ((await api.get('/api/ideas')) || {}).ideas || [];
+      listTitle.textContent = `创意库（${ideas.length}）`;
       if (!ideas.length) return ui.empty('创意库是空的——回总览漏斗记下第一个创意');
-      return h('div', { class: 'card-grid' }, ideas.map(idea => h('div', { class: 'card memory-card' },
-        h('div', { class: 'memory-head' },
+      const table = ui.table(['创意', '阶段', '问题域摘要', '创建时间', '操作'],
+        ideas.map(idea => [
           h('strong', { text: idea.name || idea.id }),
-          ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
-        h('p', { class: 'memory-content', text: (idea.domains && idea.domains.problem.summary) || '三域草案待完善' }),
-        h('div', { class: 'toolbar-actions' },
-          h('button', {
-            class: 'btn btn-sm', type: 'button', text: '打开详情',
-            onclick: () => { selectedId = idea.id; openDetail(); },
-          }),
-          h('button', {
-            class: 'btn btn-sm', type: 'button', text: '归档', title: '从创意库与市场隐藏（可恢复）',
-            onclick: () => {
-              openInlineForm(`archive-${idea.id}`, `归档「${idea.name || idea.id}」`, '', () =>
-                api.post(`/api/ideas/${idea.id}/archive`, { archived: true }), () => {
-                toast.ok('已归档（可在需要时恢复）');
-                loadList();
-              }, { noInput: true, confirmText: '确认归档', danger: '将从创意库与市场隐藏，数据保留可恢复' });
-            },
-          }),
-          h('span', { class: 'muted small', text: fmtTime(idea.createdAt) })))));
+          ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage || '—', IDEA_STAGE_VARIANTS[idea.stage] || 'muted'),
+          h('span', { class: 'muted', style: 'font-size:12.5px',
+            text: ((idea.domains && idea.domains.problem.summary) || '三域草案待完善').slice(0, 42) + (((idea.domains && idea.domains.problem.summary) || '').length > 42 ? '…' : '') }),
+          fmtTime(idea.createdAt),
+          h('div', { class: 'row-actions' },
+            h('a', { class: 'btn btn-sm', href: `#/idea?id=${idea.id}`, text: '详情' }),
+            h('button', {
+              class: 'btn btn-sm', type: 'button', text: '归档', title: '从创意库与市场隐藏（可恢复）',
+              onclick: () => {
+                openInlineForm(`archive-${idea.id}`, `归档「${idea.name || idea.id}」`, '', () =>
+                  api.post(`/api/ideas/${idea.id}/archive`, { archived: true }), () => {
+                  toast.ok('已归档（可在需要时恢复）');
+                  loadList();
+                }, { noInput: true, confirmText: '确认归档', danger: '将从创意库与市场隐藏，数据保留可恢复' });
+              },
+            })),
+        ]));
+      // 行点击 → 创意详情页（操作列按钮/链接不触发）
+      $$('tbody tr', table).forEach(tr => {
+        tr.classList.add('clickable');
+        tr.addEventListener('click', ev => {
+          if (ev.target.closest('button,a')) return;
+          const href = tr.querySelector('a[href^="#/idea?id="]')?.getAttribute('href');
+          if (href) location.hash = href.slice(1);
+        });
+      });
+      return table;
     }, '创意列表加载失败');
 
-    /** 详情区：阶段推进 + 三域编辑（带引导问题）+ MVP 方案/验证 + 记忆体 + 工作区 */
-    async function openDetail() {
-      if (!selectedId) { detailBox.innerHTML = ''; return; }
-      // 详情在列表下方：打开/切换后滚到详情起点（深链进入时视口直接落在详情）
-      requestAnimationFrame(() => {
-        if (detailBox.isConnected) detailBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-      await loadInto(detailBox, '加载创意详情…', async () => {
+    render(box,
+      ui.pageTitle('我的创意', '每个创意都是独立的生命体：自己的三域描述、自己的记忆体'),
+      ui.sectionCard(null, listTitle, listBox, mountLine));
+
+    await Promise.all([loadList(), refreshMounted()]);
+    // 深链兼容：#/ideas?id=xxx 旧入口重定向到独立详情页 #/idea?id=xxx
+    const deepId = router.query && router.query.get('id');
+    if (deepId) location.replace(`#/idea?id=${encodeURIComponent(deepId)}`);
+  };
+
+  /* ===== 面板：创意详情（独立页，#/idea?id=xxx；从列表页/抽屉/搜索进入） ===== */
+  ROUTES.idea = async box => {
+    const ideaId = router.query && router.query.get('id');
+    if (!ideaId) {
+      render(box,
+        ui.pageTitle('创意详情', ''),
+        ui.sectionCard(null, ui.empty('没有指定创意——从「我的创意」列表选择一条，或回总览漏斗记下新创意'),
+          ui.toolbar(h('a', { class: 'btn btn-sm', href: '#/ideas', text: '← 返回创意库' }))));
+      return;
+    }
+    let detailTab = 'domains'; // 二级 Tab 记忆：页内切换保持所在页签
+    const domainDirty = new Set(); // 有未保存修改的三域（页签切换前确认）
+
+    const refreshMounted = async () => {
+      try { return ((await api.get('/api/memory-bodies')) || {}).mounted || []; } catch { return []; }
+    };
+
+    const loadDetail = async () => {
+      box.innerHTML = '';
+      box.append(ui.loading('加载创意详情…'));
+      try {
         const [d, sg, ws, ldg, tk, ver] = await Promise.all([
-          api.get(`/api/ideas/${selectedId}`),
-          api.get(`/api/ideas/${selectedId}/mvp/suggestion`).catch(() => null),
-          api.get(`/api/ideas/${selectedId}/workspace`).catch(() => null),
-          api.get(`/api/ideas/${selectedId}/ledger`).catch(() => null),
-          api.get(`/api/ideas/${selectedId}/token`).catch(() => null),
-          api.get(`/api/ideas/${selectedId}/versions`).catch(() => null),
+          api.get(`/api/ideas/${ideaId}`),
+          api.get(`/api/ideas/${ideaId}/mvp/suggestion`).catch(() => null),
+          api.get(`/api/ideas/${ideaId}/workspace`).catch(() => null),
+          api.get(`/api/ideas/${ideaId}/ledger`).catch(() => null),
+          api.get(`/api/ideas/${ideaId}/token`).catch(() => null),
+          api.get(`/api/ideas/${ideaId}/versions`).catch(() => null),
         ]);
         const idea = d.idea;
         const domains = idea.domains || {};
         const questions = d.guidingQuestions || {};
         const stageIndex = IDEA_STAGES.indexOf(idea.stage);
+        const openDetail = loadDetail; // 区块内刷新引用（阶段推进/保存/回滚后重载详情）
 
         // 阶段进度：合法的下一阶段可点击推进（生命周期线性单向，prd2.md 1.2）；
         // 点击展开内联迁移表单（不使用浏览器原生弹窗）
@@ -838,7 +870,7 @@
                 try {
                   const res = await api.post(`/api/ideas/${idea.id}/transition`, { to: s, note: noteInput.value.trim() || undefined });
                   toast.ok(`已推进：${IDEA_STAGE_LABELS[res.transition.from]} → ${IDEA_STAGE_LABELS[res.transition.to]}`);
-                  await Promise.all([openDetail(), loadList()]);
+                  await openDetail();
                 } catch { confirmBtn.disabled = false; confirmBtn.textContent = '确认推进'; }
               });
             });
@@ -873,7 +905,7 @@
             });
             clearDirty();
             toast.ok(`「${idea.name}」的${DOMAIN_LABELS[key]}已更新`);
-            await Promise.all([openDetail(), loadList()]);
+            await openDetail();
           });
           return h('div', { class: 'card memory-card' },
             h('div', { class: 'memory-head' }, h('strong', { text: DOMAIN_LABELS[key] })),
@@ -1012,7 +1044,7 @@
             ideaIds: [idea.id], action: d.mounted ? 'unmount' : 'mount',
           });
           toast.ok(res.hint || '挂载状态已更新');
-          await Promise.all([openDetail(), refreshMounted()]);
+          await openDetail(); // 详情页内挂载后重载（列表页挂载行下次进入时刷新）
         });
 
         // 品牌人设（CO-02 语义 UI 化）：每创意独立人设，内容流水线按它撰写与评分
@@ -1299,29 +1331,27 @@
             return btn;
           }));
 
-        return h('div', { class: 'card section-card' },
-          h('div', { class: 'memory-head' },
-            h('h3', { class: 'card-title', text: idea.name }),
-            ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
-          stepper,
-          h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
-          tabBar,
-          detailBody);
-      }, '创意详情加载失败');
-    }
+        render(box,
+          h('div', { class: 'idea-detail-toolbar' },
+            h('a', { class: 'btn btn-sm', href: '#/ideas', text: '← 返回创意库' })),
+          h('div', { class: 'card section-card' },
+            h('div', { class: 'memory-head' },
+              h('h3', { class: 'card-title', text: idea.name }),
+              ui.badge(IDEA_STAGE_LABELS[idea.stage] || idea.stage, IDEA_STAGE_VARIANTS[idea.stage] || 'muted')),
+            stepper,
+            h('p', { class: 'muted small', text: `创意 ID ${idea.id} · 记录于 ${fmtTime(idea.createdAt)}` }),
+            tabBar,
+            detailBody));
+      } catch (err) {
+        render(box, h('div', { class: 'card panel-error' },
+          h('h3', { text: '创意详情加载失败' }),
+          h('p', { class: 'muted', text: `${(err && err.code) || 'ERROR'}：创意可能已被归档或不存在` }),
+          h('div', { class: 'toolbar-actions' },
+            h('a', { class: 'btn btn-sm', href: '#/ideas', text: '← 返回创意库' }))));
+      }
+    };
 
-    render(box,
-      ui.pageTitle('我的创意', '每个创意都是独立的生命体：自己的三域描述、自己的记忆体'),
-      ui.sectionCard('创意库', listBox, mountLine),
-      detailBox);
-
-    await Promise.all([loadList(), refreshMounted()]);
-    // 深链：#/ideas?id=xxx 直接打开该创意详情（不可见时详情区显示 403/404 提示）
-    const deepId = router.query && router.query.get('id');
-    if (deepId) {
-      selectedId = deepId;
-      openDetail();
-    }
+    await loadDetail();
   };
 
   /* ===== 面板：创意市场（prd2.md 6：浏览/检索/关注/关联/排行/协同） ===== */
