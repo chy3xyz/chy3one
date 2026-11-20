@@ -2583,11 +2583,13 @@
   /** 构建单个设置段（每次返回全新节点——面板与抽屉可能同时持有各自的实例） */
   function buildSettingsSection(key) {
     if (key === 'profile') {
+      // 账号信息用键值行（名片头已在抽屉头部展示头像与昵称，这里不再放三张空大卡）
       const info = ui.sectionCard('账号信息',
-        h('div', { class: 'card-grid' },
-          ui.statCard('昵称', currentUser.displayName || '—'),
-          ui.statCard('用户名', currentUser.username),
-          ui.statCard('注册时间', fmtTime(currentUser.createdAt))));
+        h('div', { class: 'card dr-kv-inline' },
+          drKv([
+            ['用户名', currentUser.username],
+            ['注册时间', fmtTime(currentUser.createdAt)],
+          ])));
       const displayNameInput = h('input', { class: 'input', value: currentUser.displayName || '' });
       const profileBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'button', text: '保存昵称' });
       busyBtn(profileBtn, '保存中…', async () => {
@@ -2597,6 +2599,10 @@
         if (badge) badge.textContent = `${currentUser.displayName}（${currentUser.username}）`;
         const av = $('#user-av');
         if (av) av.textContent = (currentUser.displayName || currentUser.username || 'O').trim().slice(0, 1).toUpperCase();
+        const drawerAv = document.querySelector('.drawer .dr-avatar');
+        if (drawerAv) drawerAv.textContent = (currentUser.displayName || currentUser.username || 'O').trim().slice(0, 1).toUpperCase();
+        const drawerTitle = $('#drawer-title');
+        if (drawerTitle) drawerTitle.textContent = currentUser.displayName || currentUser.username || '设置';
         toast.ok('昵称已更新');
       });
       return [info,
@@ -2672,6 +2678,10 @@
       body,
       foot: [h('button', { class: 'btn btn-sm', type: 'button', text: '关闭', onclick: () => drawer.close() })],
     });
+    // 头像名片注入抽屉头部（柠檬绿圆 + 首字母，与侧栏品牌块同语言）
+    const heading = document.querySelector('#drawer .dr-heading');
+    if (heading) heading.prepend(h('div', { class: 'dr-avatar', 'aria-hidden': 'true',
+      text: (currentUser.displayName || currentUser.username || 'O').trim().slice(0, 1).toUpperCase() }));
     renderSettings(body, section);
   }
 

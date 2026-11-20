@@ -1241,8 +1241,27 @@ body.cmode .funnel-num { font-size: 34px; }
   border-bottom: 1px solid var(--opc-border);
   display: flex;
   gap: 14px;
-  align-items: flex-start;
+  align-items: center;
 }
+
+/* 个人设置抽屉头像名片（柠檬绿圆 + mono 首字母，与侧栏品牌块/用户区同语言） */
+.dr-avatar {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--opc-lime);
+  color: #000;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 18px;
+  flex: none;
+}
+
+/* 内嵌卡片里的键值行：去掉抽屉级大 padding，行间以分隔线 */
+.dr-kv-inline .dr-kv { padding: 10px 0; }
+.dr-kv-inline .k { min-width: 88px; }
 .dr-heading { flex: 1; min-width: 0; }
 .dr-h h2 { font-size: 20px; font-weight: 540; letter-spacing: -0.3px; margin-top: 8px; line-height: 1.3; }
 
