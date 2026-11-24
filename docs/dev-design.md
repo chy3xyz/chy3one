@@ -227,6 +227,17 @@ ctx.inject(["webServer"], (webCtx) => {
 - **代码生效契约**：静态文件（static/）热读源码目录，改动即生效（响应已带 `cache-control: no-store`，防启发式缓存陈旧——曾发生 app.js 陈旧事故）；API 层（api.ts 编译进 dist）随进程固化——**改 API 必须重启 `dsh web`**，否则新面板请求 404。
 - 前端渲染串行化：面板渲染走 Promise 链，杜绝并发渲染的过期覆盖（首帧竞态事故修复，2026-09-15）。
 
+### 9.4.1 桌面（Electron）profile 接入指引（2026-11-24，dsh 0.2.2-rc.5 实测）
+
+DSH 桌面应用持有保留名 `desktop` profile，npm CLI 对其启动/插件管理/配置 dump **一律拒绝**（实测报错 `profile "desktop" is managed exclusively by the Electron application`）。opcos-bundle 本身零改造可上桌面，接入步骤：
+
+1. 安装并启动 DSH 桌面应用（首次运行初始化 `~/.dsh/profiles/desktop`；本机 2026-11-24 时点未装）。
+2. 先构建仓库产物：`npm run build`——bundle patch 以相对路径 `../../dist/dsh-plugins/*/src/index.js` 指向仓库 dist（pnpm link 后仍解析回仓库），dist 缺失即挂载失败。
+3. 插件安装走**桌面自带的 dsh 命令**（该安装的运行时 + 包管理环境；npm CLI 无权限）：`<桌面 dsh> plugin --profile desktop add link:<repo>/packages/opcos-bundle`，写 desktop profile 的 `dsh.profile.bundles`，与 web 同构。
+4. 重启桌面应用生效（`patchReload: live` 只热载 patch 配置，不热挂新 bundle）。
+5. 数据路径坑：`opc-memory` 等默认写进程 cwd，桌面进程 cwd 在应用内部——装完在 desktop profile 的用户 `cordis.patch.yml` 按 id 覆盖到固定目录（`memoriesFile: !!js dshHomePath('opcos/memories.jsonl')` 等），否则数据散进应用目录。
+6. 隔离须知：desktop 与 web 是两个独立 profile（各自数据库/凭据/数据文件），创意数据与模型凭据互不共享。
+
 > 注：M4 表内数字为各里程碑收口时点值；当前全量测试数以 `npm test` 实时输出为准（本评估时点为 174）。
 
 ## 10. PRD v2.0（CreativeOS）升级章节（DEV-OPCOS-2026-002，2026-09-16）
